@@ -1,0 +1,24 @@
+{
+  "name": "telegram-worker-proxy",
+  "version": "1.0.0",
+  "description": "High-performance Telegram proxy powered by Cloudflare Workers and WebSockets",
+  "main": "worker.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node scripts/test-worker.js"
+  },
+  "keywords": [
+    "telegram",
+    "proxy",
+    "cloudflare-workers",
+    "mtproto",
+    "websocket",
+    "anti-censorship"
+  ],
+  "author": "TWP Team",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^3.78.0"
+  }
+}
