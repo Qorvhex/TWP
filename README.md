@@ -102,7 +102,7 @@ npx wrangler deploy
 کلاینت‌های منطبق با استاندارد TWP باید از فرمت زیر پشتیبانی کنند:
 
 ```text
-tg://worker?server=<worker_hostname>&port=443[&secret=<optional_secret>]
+tg://worker?server=<worker_hostname>&ip=<CleanIp>[&secret=<optional_secret>]
 ```
 
 - **`server`**: دامنه ورکر کلادفلر (مثلاً `my-proxy.workers.dev`).
