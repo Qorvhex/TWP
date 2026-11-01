@@ -1,8 +1,9 @@
 name = "telegram-worker-proxy"
 main = "worker.js"
 compatibility_date = "2024-09-23"
-compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat", "no_websocket_standard_binary_type"]
 
-# Optional: set a secret token for access control
+# Optional environment variables
 # [vars]
-# SECRET = "your_strong_secret_token_here"
+# PROXY_SECRET = "000102030405060708090a0b0c0d0e0f"  # 16-byte hex secret (or dd + 32 hex for random padding)
+# MAX_DIALS = "45"                                  # Max connections per socket lane

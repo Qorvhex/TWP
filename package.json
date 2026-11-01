@@ -1,7 +1,7 @@
 {
   "name": "telegram-worker-proxy",
-  "version": "1.0.0",
-  "description": "High-performance Telegram proxy powered by Cloudflare Workers and WebSockets",
+  "version": "2.0.0",
+  "description": "Serverless Telegram WEB Proxy powered by Cloudflare Workers and official MTProto WebView framing",
   "main": "worker.js",
   "scripts": {
     "dev": "wrangler dev",
@@ -9,11 +9,13 @@
   },
   "keywords": [
     "telegram",
+    "webproxy",
     "proxy",
     "cloudflare-workers",
     "mtproto",
     "websocket",
-    "anti-censorship"
+    "anti-censorship",
+    "tproxy"
   ],
   "author": "TWP Team",
   "license": "MIT",

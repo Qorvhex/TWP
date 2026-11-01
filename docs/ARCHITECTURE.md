@@ -1,6 +1,6 @@
-# TWP Technical Architecture
+# TWP Technical Architecture (v2.0)
 
-This document describes the internal engineering, data flow, and networking model of the **Telegram Worker Proxy (TWP)** ecosystem.
+This document describes the internal engineering, data flow, and networking model of **TWP (Telegram Worker Proxy)** implementing the official Telegram WEB Proxy specification.
 
 ---
 
@@ -9,60 +9,63 @@ This document describes the internal engineering, data flow, and networking mode
 ```mermaid
 graph LR
     subgraph Client ["Client Device"]
-        TDesktop["Telegram Desktop (with TWP Engine)"]
+        TG["Official Telegram Client\n(Desktop / Android / iOS)"]
+        WV["Hidden WebView Carrier\n(Bridge JavaScript)"]
+        TG --- WV
     end
 
-    subgraph Edge ["Cloudflare Global Anycast Edge"]
-        Worker["TWP Cloudflare Worker (worker.js)"]
+    subgraph Edge ["Cloudflare Global Anycast Edge (worker.js)"]
+        Bridge["Bridge Endpoint\n(/?bridge=...)"]
+        Session["Session API\n(/api/v1/session)"]
+        Carrier["WebSocket Carrier\n(/api/v1/ws)"]
+        Multiplexer["Binary Frame Multiplexer\n(OPEN, DATA, WINDOW, CLOSE)"]
+        Engine["In-Worker Obfuscated2 Engine\n(AES-CTR Re-encryption & Keystream Match)"]
+        
+        Bridge --> Session
+        Session --> Carrier
+        Carrier --> Multiplexer
+        Multiplexer --> Engine
     end
 
-    subgraph Core ["Telegram Core Infrastructure"]
-        DC1["DC 1 (Miami)"]
-        DC2["DC 2 (Amsterdam)"]
-        DC4["DC 4 (Amsterdam)"]
-        DC5["DC 5 (Singapore)"]
+    subgraph Core ["Telegram Network"]
+        Backend["Telegram DCs (1-5 :443)\n(cloudflare:sockets)"]
     end
 
-    TDesktop -- "WSS (TLS 443) / RFC 6455" --> Worker
-    Worker -- "TCP Socket (cloudflare:sockets)" --> DC2
+    WV -- "HTTPS Bridge / WSS Carrier" --> Carrier
+    Engine -- "Obfuscated2 TCP Streams" --> Backend
 ```
 
 ---
 
-## 2. Why TWP Outperforms Traditional MTProxy & SOCKS5
+## 2. Key Architectural Advantages
 
-| Feature | Standard SOCKS5 | Standard MTProto Proxy | **TWP (Cloudflare Worker)** |
+| Feature | Standard MTProxy | VPS Relay (tproxy-server) | **TWP (Cloudflare Worker)** |
 | :--- | :--- | :--- | :--- |
-| **Transport Layer** | Raw TCP (Easy to fingerprint) | TCP with fake TLS | **Standard HTTPS / WSS on Port 443** |
-| **Censorship Resistance** | Low (Blocked by IP/SNI) | Medium (Active probing targets it) | **Maximum** (Uses Cloudflare Anycast CDN) |
-| **Server Infrastructure** | Requires VPS ($5/mo+) | Requires VPS ($5/mo+) | **Serverless (Cloudflare Free Tier)** |
-| **Anycast Routing** | Single IP / Single Datacenter | Single IP / Single Datacenter | **Global Anycast (200+ Cities worldwide)** |
-| **DDoS Protection** | None | Limited | **Cloudflare Enterprise Edge Shielding** |
-| **Client UI Integration** | Manual Host/Port/User/Pass | Server/Port/Secret | **Native Worker Mode with One-Click `tg://worker?...`** |
+| **Server Requirements** | Linux VPS ($5+/month) | Linux VPS + Caddy | **100% Serverless (Cloudflare Workers)** |
+| **Setup Complexity** | Complex (Compiling C, systemd) | High (Caddy, Go daemon, firewall) | **Instant (Copy-paste `worker.js`)** |
+| **DPI Detection** | High (Easily blocked by SNI/IP) | Low (Camouflaged website) | **Zero (Protected behind Cloudflare CDN)** |
+| **Client Support** | Standard MTProxy | Official Telegram WEB Proxy | **Official Telegram WEB Proxy (`tg://webproxy`)** |
+| **Global Edge Latency** | Single Datacenter | Single Datacenter | **Anycast across 300+ Cities Worldwide** |
+| **Direct Link Delivery** | Manual configuration | Manual configuration | **Built-in Web Dashboard with One-Click Link** |
 
 ---
 
 ## 3. Communication Lifecycle
 
-### Step 1: Secure Tunnel Initialization
-1. The Telegram client discovers the target Telegram DC address (e.g., `149.154.167.50:443`).
-2. `WorkerSocket` connects to the Cloudflare Worker domain over port 443 using standard TLS encryption (`QSslSocket`).
-3. An HTTP Upgrade request is dispatched:
-   ```http
-   GET /?ip=149.154.167.50&port=443 HTTP/1.1
-   Host: your-worker.workers.dev
-   Upgrade: websocket
-   Connection: Upgrade
-   Sec-WebSocket-Key: <16-byte random base64>
-   Sec-WebSocket-Version: 13
+### Step 1: Bridge Handshake
+1. The user taps a `tg://webproxy?server=<host>&secret=<secret>` link.
+2. The Telegram client verifies the secret and launches an internal WebView to:
+   ```text
+   GET /?bridge=<capability>#android=<nonce>
    ```
-4. The Worker validates optional `secret` tokens and responds with `101 Switching Protocols`.
+3. `worker.js` calculates `HMAC-SHA256` capability. Upon validation, it renders the official Bridge HTML document with cryptographic nonces and CSP headers.
 
-### Step 2: Outbound TCP Connect
-1. Inside the Cloudflare Worker, `import { connect } from 'cloudflare:sockets'` immediately establishes a raw TCP socket to the specified Telegram Datacenter IP and port.
-2. The WebSocket streams are converted to `arraybuffer` to ensure zero serialization overhead.
+### Step 2: Session & Carrier Establishment
+1. The WebView executes the isolated bridge script, issues `POST /api/v1/session` with a `HELLO` frame (`0x10`), and receives a `WELCOME` frame (`0x11`) and a signed `sessionToken`.
+2. The bridge initiates a WebSocket connection to `/api/v1/ws` with `Sec-WebSocket-Protocol: tproxy-v1.<sessionToken>`.
 
-### Step 3: Bi-directional MTProto Streaming
-1. Client-to-Server MTProto frames are encapsulated into standard binary WebSocket frames (Opcode `0x02`), masked according to RFC 6455.
-2. The Worker unmasks the payload and streams it directly to the Telegram DC socket writable stream.
-3. Telegram DC replies with MTProto response packets, which the Worker encapsulates back into binary WebSocket frames and streams down to the client.
+### Step 3: Multiplexed TCP Streaming via `cloudflare:sockets`
+1. For every MTProto stream, the client issues an `OPEN` frame (`0x01`).
+2. `worker.js` calls `connect({ hostname, port })` using `cloudflare:sockets` to establish an outbound TCP socket to the backend.
+3. `DATA` frames (`0x02`) are piped directly to the TCP socket writer.
+4. Incoming TCP data is read and wrapped in `DATA` binary frames sent over WebSocket back to the client.

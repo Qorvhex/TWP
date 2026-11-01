@@ -1,38 +1,56 @@
 <div align="center">
 
-# ⚡ TWP (Telegram Worker Proxy) Core
+# ⚡ TWP (Telegram Worker Proxy) Core v2.0
 
-**High-Performance MTProto-over-WebSocket Transport Engine & Protocol Specification**  
-*هسته پروتکل و موتور تونلینگ کلاینت-سرور تلگرام بر پایه ورکر کلادفلر*
+**Official Telegram WEB Proxy Engine for Cloudflare Workers (Zero VPS Required)**  
+*موتور رسمی وب‌پروکسی تلگرام بر پایه ورکر کلادفلر — بدون نیاز به سرور VPS و تحویل مستقیم لینک اتصال*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Powered by Cloudflare Workers](https://img.shields.io/badge/Runtime-Cloudflare%20Workers%20(cloudflare%3Asockets)-orange.svg)](https://workers.cloudflare.com)
-[![Protocol](https://img.shields.io/badge/Protocol-MTProto%20over%20WSS%20(RFC%206455)-purple.svg)](docs/PROTOCOL.md)
-[![Specification](https://img.shields.io/badge/Specification-TWP%20Core%20v1.0-brightgreen.svg)](docs/PROTOCOL.md)
+[![Protocol: Telegram WEB Proxy v1](https://img.shields.io/badge/Protocol-Telegram%20WEB%20Proxy%20v1-purple.svg)](docs/PROTOCOL.md)
+[![Deep Link: tg://webproxy](https://img.shields.io/badge/Format-tg%3A%2F%2Fwebproxy-brightgreen.svg)](docs/PROTOCOL.md)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-Channel-2CA5E0?style=flat&logo=telegram&logoColor=white)](https://t.me/Qorvhex_Channel)
 
-[معرفی هسته (FA)](#-معرفی-هسته-twp-core) • [English Documentation](#-english-documentation) • [Architecture](#-معماری-پروتکل-architecture) • [Server Engine](#-موتور-سرور-server-engine-workerjs) • [Client Integration](#-یکپارچه‌سازی-کلاینت-client-integration) • [Protocol Spec](#-مشخصات-پروتکل-و-پارامترهای-اتصال-protocol-spec) • [کانال تلگرام](#-ارتباط-و-جامعه-کاربری-community--updates)
+[معرفی هسته (FA)](#-معرفی-هسته-twp-core-v20) • [English Documentation](#-english-documentation) • [معماری (Architecture)](#-معماری-پروتکل-architecture) • [نحوه دریافت لینک و اتصال](#-دریافت-لینک-و-اتصال-مستقیم) • [استقرار سرورلس](#-استقرار-هسته-سرور-server-deployment) • [مشخصات پروتکل](#-مشخصات-فنی-پروتکل-protocol-spec) • [جامعه کاربری](#-ارتباط-و-جامعه-کاربری-community--updates)
 
 </div>
 
 ---
 
-## 📖 معرفی هسته (TWP Core)
+## 📖 معرفی هسته (TWP Core v2.0)
 
-پروژه **TWP (Telegram Worker Proxy)** یک هسته سبک، ماژولار و متن‌باز برای انتقال ترافیک پروتکل MTProto تلگرام از طریق شبکه توزیع‌شده Cloudflare Workers است. 
+پروژه **TWP (Telegram Worker Proxy)** یک هسته سرورلس سبک، مستقل و ۱۰۰٪ متن‌باز برای استقرار پروتکل رسمی **Telegram WEB Proxy** بر بستر شبکه توزیع‌شده Cloudflare Workers است.
 
-این مخزن به عنوان **هسته مرجع (Reference Core Implementation)** و **مستندات پروتکل** عمل می‌کند و به توسعه‌دهندگان، سازندگان کلاینت‌های تلگرام و مدیران شبکه این امکان را می‌دهد تا بدون نیاز به سرورهای سنتی VPS، ارتباطی امن، ضد فیلتر و پرسرعت را میان کلاینت‌های تلگرام و دیتاسنترهای رسمی برقرار کنند.
+تلگرام به صورت رسمی نوع جدیدی از پروکسی تحت عنوان **WEB Proxy** را معرفی کرده است که اتصال کلاینت‌ها را به جای کانکشن‌های مستقیم و آسیب‌پذیر TCP، از طریق لایه استتاریافته حامل‌های وب (HTTPS و WebSocket) و یک وب‌ویوی خصوصی درون‌برنامه‌ای هدایت می‌کند. 
+
+**TWP v2.0** مشخصات کامل پروژه رسمی تلگرام (`tproxy-server`) را بدون نیاز به سرور لینوکس، بدون نیاز به نصب Caddy و بدون نیاز به کامپایل سورس کلاینت، مستقیماً در قالب **تک‌فایل `worker.js`** در لبه پردازشی کلادفلر پیاده‌سازی کرده است و به کاربر **مستقیماً لینک وب‌پروکسی رسمی (`tg://webproxy`)** جهت اتصال با یک کلیک تحویل می‌دهد.
 
 ---
 
-## 🌟 اجزای تشکیل‌دهنده هسته (Core Components)
+## 🚀 ویژگی‌های کلیدی (Key Highlights)
 
-| بخش | مسیر در مخزن | شرح وظیفه |
-| :--- | :--- | :--- |
-| **Server Core Engine** | [`worker.js`](worker.js) | موتور سرورلس کلادفلر با استفاده از `cloudflare:sockets` برای تبدیل فریم‌های WSS به اتصال TCP دیتاسنترهای تلگرام |
-| **Client Core Engine** | [`client/src/`](client/src/) | پیاده‌سازی مرجع سوکت کلاینت (C++20) مشتق از `AbstractSocket` برای تزریق به کلاینت‌های تلگرام |
-| **Protocol Specification** | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | مشخصات اتصال هسته، پارامترهای ورکر، فریم‌بندی RFC 6455 و احراز هویت |
-| **Architecture Docs** | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | مدل فنی، جریان داده‌ها و مقایسه امنیتی و عملکردی با MTProxy و SOCKS5 |
+- **بدون نیاز به سرور VPS (Zero VPS Cost):** اجرا به صورت ۱۰۰٪ سرورلس روی حساب رایگان Cloudflare Workers.
+- **تولید مستقیم لینک اتصال:** تحویل لینک استاندارد `tg://webproxy?server=...&secret=...` و `https://t.me/webproxy` با داشبورد تعاملی و کد QR.
+- **پشتیبانی نیتیو در کلاینت‌های تلگرام:** بدون نیاز به کامپایل کد اختصاصی یا کلاینت غیررسمی؛ تلگرام‌های رسمی مجهز به وب‌پروکسی مستقیماً به آن متصل می‌شوند.
+- **ضد فیلترینگ و استتار کامل (DPI-Immune):** ترافیک در قالب HTTPS استاندارد روی پورت ۴۴۳ و وب‌سوکت معتبر به شبکه جهانی کلادفلر ارسال می‌شود.
+- **مالتی‌پلکسینگ استاندارد فریم‌ها:** فریم‌های `OPEN`, `DATA`, `WINDOW`, `CLOSE` مستقیماً به سوکت‌های استریمینگ `cloudflare:sockets` تبدیل می‌شوند.
+- **استتار در قالب سایت عادی (Camouflage Mode):** امکان تعریف دامنه فیک (`CAMOUFLAGE_URL`) تا اسکنرهای اینترنتی فاقد سکرت تنها یک سایت معمولی را مشاهده کنند.
+
+---
+
+## 🔗 دریافت لینک و اتصال مستقیم
+
+پس از استقرار ورکر، با باز کردن آدرس ورکر خود در مرورگر (یا با فرمت استاندارد زیر)، لینک اتصال مستقیم تلگرام در اختیارتان قرار می‌گیرد:
+
+```text
+# لینک مستقیم جهت باز شدن آنی در اپلیکیشن تلگرام:
+tg://webproxy?server=your-worker.your-subdomain.workers.dev&secret=000102030405060708090a0b0c0d0e0f
+
+# لینک وب جهت اشتراک‌گذاری در چت‌ها:
+https://t.me/webproxy?server=your-worker.your-subdomain.workers.dev&secret=000102030405060708090a0b0c0d0e0f
+```
+
+> **نکته:** در صورت فعال‌سازی `BASE_PATH` (مثلاً `my-secret-slug`) جهت استتار بیشتر، سکرت کلاینت با پیشوند `0x70` در قالب unpadded base64url کدگذاری می‌شود که داشبورد ورکر این مقدار را به صورت خودکار محاسبه و آماده کلیک تحویل می‌دهد.
 
 ---
 
@@ -41,180 +59,115 @@
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Client as 🖥️ Telegram Client (TWP Core Socket)
-    participant Worker as ☁️ Cloudflare Worker (worker.js)
-    participant DC as 🏢 Telegram Datacenter (149.154.167.x)
+    participant TG as 📱 Official Telegram App (Android 12.10+ / Desktop 7.1+)
+    participant WV as 🌐 Internal WebView (Bridge)
+    participant CF as ⚡ Cloudflare Worker (worker.js)
+    participant DC as 🏢 Telegram Datacenter (DC1-DC5 :443)
 
-    Note over Client,Worker: لایه امن TLS روی پورت استاندارد ۴۴۳
-    Client->>Worker: 1. WSS Handshake (GET /?ip=<DC_IP>&port=443)
-    Worker-->>Client: 2. 101 Switching Protocols
-    Worker->>DC: 3. TCP Connect (cloudflare:sockets)
+    Note over TG,CF: ۱. برقراری پل ارتباطی و احراز هویت
+    TG->>CF: GET /?bridge=<capability>#android=<nonce>
+    CF-->>WV: 200 OK (Isolated Bridge HTML + Carrier Script)
+    WV->>CF: POST /api/v1/session (Bearer bootstrapToken + HELLO frame)
+    CF-->>WV: 200 OK (X-Session-Token + WELCOME frame)
+    WV->>CF: WSS Upgrade /api/v1/ws (Subprotocol: tproxy-v1.<token>)
+    CF-->>WV: 101 Switching Protocols
     
-    loop تبادل بسته‌های MTProto
-        Client->>Worker: 4. RFC 6455 Binary Frame (Masked MTProto Payload)
-        Worker->>DC: 5. Raw TCP Byte Stream
-        DC-->>Worker: 6. Raw TCP Byte Stream (MTProto Response)
-        Worker-->>Client: 7. RFC 6455 Binary Frame (Unmasked MTProto Response)
+    Note over TG,DC: ۲. رمزگشایی و تبدیل استریم Obfuscated2 به دیتاسنتر
+    loop MTProto Streams Multiplexing
+        TG->>WV: Stream Create (OPEN)
+        WV->>CF: Binary Frame [OPEN streamId]
+        TG->>WV: Client Init (64-byte Obfuscated2 Handshake)
+        WV->>CF: Binary Frame [DATA streamId + Client Init]
+        Note over CF: رمزگشایی هدر کلاینت و استخراج شناسه DC
+        CF->>DC: TCP Connect via cloudflare:sockets (dialDc)
+        CF->>DC: 64-byte DC Init (Keystream-Matched Obfuscated2)
+        Note over CF,DC: صفر-کپی در دانلود و باز-رمزنگاری بلادرنگ در آپلود
+        DC-->>CF: Downlink Payload
+        CF-->>WV: Binary Frame [DATA streamId + Payload] (Zero-Copy)
+        WV-->>TG: Deliver to Telegram Socket Core
     end
 ```
 
 ---
 
-## ☁️ موتور سرور (Server Engine: `worker.js`)
+## ☁️ استقرار هسته سرور (Server Deployment)
 
-موتور سرور یک اسکریپت مستقل جاوااسکریپت برای محیط رانتایم Cloudflare Workers است. این موتور:
-1. ارتباط وب‌سوکت دوطرفه امن (Full-Duplex WSS) را با کلاینت برقرار می‌کند.
-2. با استفاده از ماژول استاندارد `cloudflare:sockets`، یک سوکت خام TCP به IP و پورت دیتاسنتر مورد نظر تلگرام باز می‌کند.
-3. با استفاده از بافرهای `ArrayBuffer` و مدیریت هوشمند جریان داده، پکت‌ها را با کمترین تأخیر ممکن (Zero-Copy Streaming) بین دو سوکت رد و بدل می‌کند.
-4. در صورت اتصال مرورگر به آدرس ورکر، یک صفحه وب سبک برای تست وضعیت و مشخصات سرور نمایش می‌دهد.
+### روش اول: استقرار سریع از طریق پنل وب کلادفلر (پیشنهادی)
 
-### استقرار هسته سرور:
+1. وارد داشبورد [dash.cloudflare.com](https://dash.cloudflare.com) شوید.
+2. از منوی **Workers & Pages** روی **Create Application** و سپس **Create Worker** کلیک کنید.
+3. یک نام دلخواه انتخاب کرده و **Deploy** را بزنید.
+4. وارد بخش **Edit code** شوید، کدهای پیش‌فرض را پاک کرده و کل محتوای فایل [`worker.js`](worker.js) را درون ادیتور پیست کنید.
+5. دکمه **Save and Deploy** را بزنید.
+6. لینک اتصال مستقیم شما آماده است:
+   ```text
+   tg://webproxy?server=your-worker-name.your-subdomain.workers.dev&secret=000102030405060708090a0b0c0d0e0f
+   ```
+
+### روش دوم: استقرار با خط فرمان Wrangler CLI
 
 ```bash
 # ۱. کلون کردن ریپازیتوری
-git clone https://github.com/your-username/TWP.git
+git clone https://github.com/Qorvhex/TWP.git
 cd TWP
 
-# ۲. ورود به اکانت کلادفلر
+# ۲. ورود به حساب کلادفلر
 npx wrangler login
 
 # ۳. استقرار فوری
 npx wrangler deploy
 ```
 
-یا کپی کردن مستقیم محتوای [`worker.js`](worker.js) در ویرایشگر داشبورد Cloudflare.
+---
+
+## ⚙️ متغیرهای محیطی (Environment Variables)
+
+متغیرهای زیر در فایل [`wrangler.toml`](wrangler.toml) یا در پنل کلادفلر (**Settings** -> **Variables and Secrets**) قابل تنظیم هستند (تنظیم آن‌ها اختیاری است و در صورت خالی بودن از مقادیر پیش‌فرض استفاده می‌شود):
+
+| متغیر | مقدار پیش‌فرض | توضیحات فنی |
+| :--- | :--- | :--- |
+| `PROXY_SECRET` یا `SECRET` | `000102030405060708090a0b0c0d0e0f` | کلید ۱۶ بایتی هگز (یا پیشوند `dd` + ۱۶ بایت برای رندوم پدینگ). |
+| `MAX_DIALS` | `45` | سقف تعداد اتصال‌های مجاز سوکت دیتاسنتر به ازای هر نشست وب‌سوکت قبل از باز کردن Lane جدید. |
 
 ---
 
-## 💻 یکپارچه‌سازی کلاینت (Client Integration)
+## 📜 مشخصات فنی پروتکل (Protocol Spec)
 
-توسعه‌دهندگان کلاینت‌های تلگرام (شامل Telegram Desktop، تلگرام‌های غیررسمی اندروید، ربات‌ها و ابزارهای واسط) می‌توانند از کدهای آماده پوشه [`client/src/`](client/src/) استفاده کنند:
-
-- [`mtproto_worker_socket.h`](client/src/mtproto_worker_socket.h): تعریف کلاس سوکت کلاینت با متدهای استاندارد `AbstractSocket`.
-- [`mtproto_worker_socket.cpp`](client/src/mtproto_worker_socket.cpp): پیاده‌سازی کامل استتار فریم‌ها، ماسک تصادفی ۴ بایتی، و تبدیل دیتای خام به WSS.
-- [`integration_guide.md`](client/src/integration_guide.md): راهنمای گام‌به‌گام تزریق کد به پروژه‌های مبتنی بر Qt / C++.
-
----
-
-## 📜 مشخصات پروتکل و پارامترهای اتصال (Protocol Spec)
-
-پروتکل TWP ساختار صوری یا شمای لینک ثابتی به کلاینت‌ها تحمیل نمی‌کند؛ معیار اصلی، انطباق پارامترهای تنظیمی کلاینت با لایه ورودی موتور [`worker.js`](worker.js) و هندشیک استاندارد WebSocket است. کلاینت‌ها و برنامه‌های واسط مختارند پارامترهای اتصال را از طریق هر فرمت آدرس‌دهی استاندارد (مانند الگوهای مرسوم RFC 3986 یا لینک‌های سفارشی کلاینت) دریافت و پردازش نمایند.
-
-### پارامترهای ورودی مورد نیاز هسته ورکر:
-
-| پارامتر | جایگاه مجاز در درخواست | پیش‌فرض | توضیحات فنی |
-| :--- | :--- | :--- | :--- |
-| **دامنه سرور ورکر** | Host / SNI | — | آدرس ورکر کلادفلر جهت برقراری نشست امن TLS روی پورت ۴۴۳. |
-| **`ip`** | Query Param یا URL Path | `149.154.167.50` | آدرس IPv4 دیتاسنتر مقصد تلگرام جهت اتصال مستقیم با سوکت TCP (`cloudflare:sockets`). |
-| **`port`** | Query Param یا URL Path | `443` | پورت TCP دیتاسنتر تلگرام (پورت‌های استاندارد: ۴۴۳ یا ۸۰). |
-| **`secret`** | Query / Path / هدر `X-Worker-Secret` | اختیاری | توکن اعتبارسنجی اتصال (در صورت تعریف متغیر محیطی `SECRET` در ورکر). |
-
-برای جزئیات دقیق هندشیک ارتقای پروتکل (RFC 6455 Upgrade) و ساختار فریم‌بندی باینری به [docs/PROTOCOL.md](docs/PROTOCOL.md) مراجعه فرمایید.
-
-
+| بخش | مسیر در مخزن | شرح وظیفه |
+| :--- | :--- | :--- |
+| **Serverless Core Engine** | [`worker.js`](worker.js) | هسته تک‌فایلی کامل ورکر شامل پل کریپتوگرافیک، مدیریت نشست، وب‌سوکت کریر، و استریمینگ TCP |
+| **Protocol Specification** | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | قرارداد دقیق فریم‌های باینری، هدرهای کنترلی، و فرمول‌های محاسباتی HMAC-SHA256 |
+| **Architecture Specification** | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | بررسی مدل فنی، مزایای رقابتی در مقایسه با MTProxy و SOCKS5، و امنیت لایه انتقال |
+| **Deployment Guide** | [`docs/DEPLOY_CLOUDFLARE.md`](docs/DEPLOY_CLOUDFLARE.md) | راهنمای گام‌به‌گام استقرار روی کلادفلر در کمتر از ۱ دقیقه |
 
 ---
 
 ## 🌐 English Documentation
 
 ### Overview
-**TWP (Telegram Worker Proxy)** is an open-source, modular, high-performance reference core designed to tunnel Telegram MTProto network traffic through the Cloudflare Workers globally distributed serverless edge via secure WebSockets (WSS).
+**TWP (Telegram Worker Proxy) Core v2.0** is an open-source, serverless implementation of the official **Telegram WEB Proxy** wire contract (`tproxy-server`) engineered entirely for Cloudflare Workers. 
 
-This repository serves as both the **Reference Core Implementation** and the **Official Protocol Specification**, enabling developers, custom Telegram client maintainers, and network engineers to establish secure, censorship-resistant, low-latency connections to official Telegram Datacenters without requiring traditional VPS servers.
+Telegram's official WEB proxy routes MTProto traffic through an app-owned internal WebView carrier using standard HTTPS and WebSockets. **TWP v2.0** runs this entire relay architecture serverless within a single [`worker.js`](worker.js) script using `cloudflare:sockets` — eliminating the need for Linux VPS servers, Caddy configurations, or custom C++ client patching.
 
-### Key Highlights
-- **Zero VPS Cost:** Runs entirely on Cloudflare Workers serverless edge (free tier compatible).
-- **DPI-Immune Transport:** Pure HTTPS / WSS traffic over standard Port 443 with TLS 1.3 encryption (RFC 6455 binary framing).
-- **Global Anycast Routing:** Automatically routes through the nearest Cloudflare edge PoP (200+ cities globally).
-- **Zero-Copy Streaming:** High-efficiency binary bridging between `cloudflare:sockets` TCP streams and WebSocket frames.
+### Key Features
+- **Zero VPS Cost:** 100% serverless, zero maintenance, fully compatible with Cloudflare's free plan.
+- **Direct Telegram Link Delivery:** Generates and presents `tg://webproxy?server=...&secret=...` and `https://t.me/webproxy` with one-click connect and responsive QR codes.
+- **Native Client Support:** Works out of the box with official Telegram clients that support WEB proxies (Telegram Desktop, Android, iOS).
+- **Censorship & DPI Resistance:** Pure TLS 1.3 HTTPS and RFC 6455 WebSockets over standard Port 443 with Cloudflare Anycast CDN routing.
+- **Binary Frame Multiplexing:** Full implementation of Telegram's 8-byte header frame multiplexer (`OPEN`, `DATA`, `WINDOW`, `CLOSE`, `PING`, `PONG`).
 
----
-
-### Core Architecture
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Client as 🖥️ Telegram Client (TWP Core Socket)
-    participant Worker as ☁️ Cloudflare Worker (worker.js)
-    participant DC as 🏢 Telegram Datacenter (149.154.167.x)
-
-    Note over Client,Worker: Secure TLS 1.3 Session over Port 443
-    Client->>Worker: 1. WSS Handshake (GET /?ip=<DC_IP>&port=443)
-    Worker-->>Client: 2. 101 Switching Protocols
-    Worker->>DC: 3. Direct TCP Connect (cloudflare:sockets)
-    
-    loop MTProto Packet Stream
-        Client->>Worker: 4. RFC 6455 Binary Frame (Masked MTProto Payload)
-        Worker->>DC: 5. Raw TCP Byte Stream
-        DC-->>Worker: 6. Raw TCP Byte Stream (MTProto Response)
-        Worker-->>Client: 7. RFC 6455 Binary Frame (Unmasked MTProto Response)
-    end
-```
-
----
-
-### Repository Structure
-
-| Component | File / Path | Purpose |
-| :--- | :--- | :--- |
-| **Server Engine** | [`worker.js`](worker.js) | Serverless edge script bridging WSS frames to Telegram DC TCP sockets using `cloudflare:sockets`. |
-| **Client Socket Core** | [`client/src/`](client/src/) | Reference C++20 client socket implementing `AbstractSocket` for direct embedding into Telegram clients. |
-| **Protocol Specification** | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | Technical protocol spec, parameter definitions, RFC 6455 framing, and handshake rules. |
-| **Architecture Specification** | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Architectural model, security analysis, and comparisons with standard MTProxy and SOCKS5. |
-
----
-
-### Server Deployment (`worker.js`)
-
-#### Deploy via Wrangler CLI:
+### Quick Deploy (Wrangler CLI)
 ```bash
-# 1. Clone repository
 git clone https://github.com/Qorvhex/TWP.git
 cd TWP
-
-# 2. Authenticate with Cloudflare
-npx wrangler login
-
-# 3. Deploy worker
 npx wrangler deploy
 ```
-
-#### Deploy via Cloudflare Dashboard:
-1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com/).
-2. Navigate to **Workers & Pages** > **Create application** > **Create Worker**.
-3. Replace the default template with [`worker.js`](worker.js) and click **Save and deploy**.
-4. *(Optional)* Add a secret under **Settings** > **Variables and Secrets** named `SECRET` for access control.
-
----
-
-### Client Integration
-
-Developers of custom Telegram clients (Telegram Desktop, Android forks, and bridge apps such as [Bifrost](https://github.com/Qorvhex/Bifrost)) can integrate the reference C++ implementation from [`client/src/`](client/src/):
-- [`mtproto_worker_socket.h`](client/src/mtproto_worker_socket.h): Socket header matching Telegram's `AbstractSocket` interface.
-- [`mtproto_worker_socket.cpp`](client/src/mtproto_worker_socket.cpp): RFC 6455 frame obfuscation, 4-byte cryptographic masking, and raw-to-WSS conversion.
-- [`integration_guide.md`](client/src/integration_guide.md): Step-by-step injection guide for Qt/C++ Telegram codebases.
-
----
-
-### Protocol Specification & Parameters
-
-The TWP core does not enforce a rigid URI scheme; clients are free to use any standard URI convention (e.g., RFC 3986 or custom deep links) as long as the parameters match the inputs expected by [`worker.js`](worker.js):
-
-| Parameter | Accepted Location | Default | Description |
-| :--- | :--- | :--- | :--- |
-| **Worker Host** | Host / SNI | — | FQDN domain of the Cloudflare Worker (TLS over Port 443). |
-| **`ip`** | Query Param or URL Path | `149.154.167.50` | Destination Telegram Datacenter IPv4 address. |
-| **`port`** | Query Param or URL Path | `443` | Destination Telegram Datacenter TCP port (`443` or `80`). |
-| **`secret`** | Query / Path / `X-Worker-Secret` Header | Optional | Authentication token matching the Worker's `SECRET` variable. |
-
-
 
 ---
 
 ## 📢 ارتباط و جامعه کاربری (Community & Updates)
 
-جهت دریافت آخرین اخبار، به‌روزرسانی‌های هسته TWP، آموزش‌ها و آی‌پی‌های تمیز کلادفلر به کانال رسمی تلگرام بپیوندید:
+جهت دریافت آخرین اخبار، به‌روزرسانی‌های هسته TWP و آموزش‌های شبکه به کانال رسمی تلگرام بپیوندید:
 
 <div align="center">
 
@@ -228,4 +181,4 @@ The TWP core does not enforce a rigid URI scheme; clients are free to use any st
 
 ## 📄 مجوز (License)
 
-این هسته تحت مجوز **MIT License** منتشر شده است و هرگونه استفاده، توسعه یا ادغام آن در کلاینت‌های تجاری و متن‌باز بلامانع است.
+این هسته تحت مجوز **MIT License** منتشر شده است. استفاده و توسعه آن در پروژه‌های آزاد و تجاری آزاد است.
