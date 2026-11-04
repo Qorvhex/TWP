@@ -9,9 +9,10 @@
 [![Powered by Cloudflare Workers](https://img.shields.io/badge/Runtime-Cloudflare%20Workers%20(cloudflare%3Asockets)-orange.svg)](https://workers.cloudflare.com)
 [![Protocol: Telegram WEB Proxy v1](https://img.shields.io/badge/Protocol-Telegram%20WEB%20Proxy%20v1-purple.svg)](docs/PROTOCOL.md)
 [![Deep Link: tg://webproxy](https://img.shields.io/badge/Format-tg%3A%2F%2Fwebproxy-brightgreen.svg)](docs/PROTOCOL.md)
+[![Deploy Bot](https://img.shields.io/badge/Telegram-Deployer_Bot-2CA5E0?style=flat&logo=telegram&logoColor=white)](https://t.me/qorvhexdeployer_bot)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-Channel-2CA5E0?style=flat&logo=telegram&logoColor=white)](https://t.me/Qorvhex_Channel)
 
-[معرفی هسته (FA)](#-معرفی-هسته-twp-core-v20) • [English Documentation](#-english-documentation) • [معماری (Architecture)](#-معماری-پروتکل-architecture) • [نحوه دریافت لینک و اتصال](#-دریافت-لینک-و-اتصال-مستقیم) • [استقرار سرورلس](#-استقرار-هسته-سرور-server-deployment) • [مشخصات پروتکل](#-مشخصات-فنی-پروتکل-protocol-spec) • [جامعه کاربری](#-ارتباط-و-جامعه-کاربری-community--updates)
+[معرفی هسته (FA)](#-معرفی-هسته-twp-core-v20) • [نصب سریع با ربات](#روش-اول-استقرار-سریع-و-خودکار-با-ربات-تلگرام-پیشنهادی) • [English Documentation](#-english-documentation) • [معماری (Architecture)](#-معماری-پروتکل-architecture) • [نحوه دریافت لینک و اتصال](#-دریافت-لینک-و-اتصال-مستقیم) • [استقرار سرورلس](#-استقرار-هسته-سرور-server-deployment) • [مشخصات پروتکل](#-مشخصات-فنی-پروتکل-protocol-spec) • [جامعه کاربری](#-ارتباط-و-جامعه-کاربری-community--updates)
 
 </div>
 
@@ -92,7 +93,29 @@ sequenceDiagram
 
 ## ☁️ استقرار هسته سرور (Server Deployment)
 
-### روش اول: استقرار سریع از طریق پنل وب کلادفلر (پیشنهادی)
+### روش اول: استقرار سریع و خودکار با ربات تلگرام (پیشنهادی)
+
+ساده‌ترین و سریع‌ترین روش برای راه‌اندازی و استقرار خودکار TWP بدون نیاز به کامپیوتر یا دانش فنی، استفاده از ربات تلگرام دیپلویر است:
+
+<div align="center">
+
+[![Deploy with Telegram Bot](https://img.shields.io/badge/Deploy%20with-Telegram%20Bot-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/qorvhexdeployer_bot)
+
+👉 **[ورود مستقیم به ربات دیپلویر: @qorvhexdeployer_bot](https://t.me/qorvhexdeployer_bot)** 👈
+
+</div>
+
+1️⃣ وارد ربات دیپلویر بشید: [@qorvhexdeployer_bot](https://t.me/qorvhexdeployer_bot)  
+2️⃣ اول مطمئن شید که یه حساب کاربری توی سایت [dash.cloudflare.com](https://dash.cloudflare.com) دارید.  
+3️⃣ روی دکمه «🔑 ورود به صفحه ساخت توکن» کلیک کنید.  
+4️⃣ در صفحه‌ای که باز میشه فقط اسکرول کنید پایین و روی **Continue to summary** بزنید.  
+5️⃣ در صفحه بعد روی **Create Token** بزنید.  
+6️⃣ توکن نمایش داده شده رو کپی کنید و برای ربات ارسال کنید! ✨  
+7️⃣ گزینه **نصب وب پروکسی تلگرام (TWP)** رو انتخاب کنید.
+
+---
+
+### روش دوم: استقرار از طریق پنل وب کلادفلر
 
 1. وارد داشبورد [dash.cloudflare.com](https://dash.cloudflare.com) شوید.
 2. از منوی **Workers & Pages** روی **Create Application** و سپس **Create Worker** کلیک کنید.
@@ -104,7 +127,7 @@ sequenceDiagram
    tg://webproxy?server=your-worker-name.your-subdomain.workers.dev&secret=000102030405060708090a0b0c0d0e0f
    ```
 
-### روش دوم: استقرار با خط فرمان Wrangler CLI
+### روش سوم: استقرار با خط فرمان Wrangler CLI
 
 ```bash
 # ۱. کلون کردن ریپازیتوری
@@ -156,7 +179,27 @@ Telegram's official WEB proxy routes MTProto traffic through an app-owned intern
 - **Censorship & DPI Resistance:** Pure TLS 1.3 HTTPS and RFC 6455 WebSockets over standard Port 443 with Cloudflare Anycast CDN routing.
 - **Binary Frame Multiplexing:** Full implementation of Telegram's 8-byte header frame multiplexer (`OPEN`, `DATA`, `WINDOW`, `CLOSE`, `PING`, `PONG`).
 
-### Quick Deploy (Wrangler CLI)
+### ⚡ 1-Click Quick Deploy via Telegram Bot (Recommended)
+
+The easiest and fastest way to deploy TWP in under 1 minute without needing any coding or server setup:
+
+<div align="center">
+
+[![Deploy with Telegram Bot](https://img.shields.io/badge/Deploy%20with-Telegram%20Bot-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/qorvhexdeployer_bot)
+
+👉 **[Launch Deployer Bot: @qorvhexdeployer_bot](https://t.me/qorvhexdeployer_bot)** 👈
+
+</div>
+
+1️⃣ Open the deployer bot: [@qorvhexdeployer_bot](https://t.me/qorvhexdeployer_bot)  
+2️⃣ Ensure you have an active account on [dash.cloudflare.com](https://dash.cloudflare.com).  
+3️⃣ Click the button **«🔑 ورود به صفحه ساخت توکن»** (Open Token Creation Page).  
+4️⃣ On the Cloudflare page that opens, simply scroll down and click **Continue to summary**.  
+5️⃣ On the next page, click **Create Token**.  
+6️⃣ Copy the displayed token and send it to the bot! ✨  
+7️⃣ Select the **نصب وب پروکسی تلگرام (TWP)** (Install Telegram Web Proxy - TWP) option.
+
+### Alternative Deploy (Wrangler CLI)
 ```bash
 git clone https://github.com/Qorvhex/TWP.git
 cd TWP
