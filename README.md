@@ -97,13 +97,6 @@ sequenceDiagram
 
 ساده‌ترین و سریع‌ترین روش برای راه‌اندازی و استقرار خودکار TWP بدون نیاز به کامپیوتر یا دانش فنی، استفاده از ربات تلگرام دیپلویر است:
 
-<div align="center">
-
-[![Deploy with Telegram Bot](https://img.shields.io/badge/Deploy%20with-Telegram%20Bot-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/qorvhexdeployer_bot)
-
-👉 **[ورود مستقیم به ربات دیپلویر: @qorvhexdeployer_bot](https://t.me/qorvhexdeployer_bot)** 👈
-
-</div>
 
 1️⃣ وارد ربات دیپلویر بشید: [@qorvhexdeployer_bot](https://t.me/qorvhexdeployer_bot)  
 2️⃣ اول مطمئن شید که یه حساب کاربری توی سایت [dash.cloudflare.com](https://dash.cloudflare.com) دارید.  
@@ -182,14 +175,6 @@ Telegram's official WEB proxy routes MTProto traffic through an app-owned intern
 ### ⚡ 1-Click Quick Deploy via Telegram Bot (Recommended)
 
 The easiest and fastest way to deploy TWP in under 1 minute without needing any coding or server setup:
-
-<div align="center">
-
-[![Deploy with Telegram Bot](https://img.shields.io/badge/Deploy%20with-Telegram%20Bot-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/qorvhexdeployer_bot)
-
-👉 **[Launch Deployer Bot: @qorvhexdeployer_bot](https://t.me/qorvhexdeployer_bot)** 👈
-
-</div>
 
 1️⃣ Open the deployer bot: [@qorvhexdeployer_bot](https://t.me/qorvhexdeployer_bot)  
 2️⃣ Ensure you have an active account on [dash.cloudflare.com](https://dash.cloudflare.com).  
