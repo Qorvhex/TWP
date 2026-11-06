@@ -1,10 +1,14 @@
 {
   "name": "telegram-worker-proxy",
-  "version": "2.0.0",
+  "version": "2.2.0",
+  "type": "module",
   "description": "Serverless Telegram WEB Proxy powered by Cloudflare Workers and official MTProto WebView framing",
   "main": "worker.js",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --port 3000 --ip 0.0.0.0",
+    "build": "wrangler deploy --dry-run --outdir=dist",
+    "lint": "node --check worker.js && wrangler deploy --dry-run --outdir=dist",
+    "test": "node --import ./test/cf-loader.mjs --test test/worker.test.mjs",
     "deploy": "wrangler deploy"
   },
   "keywords": [

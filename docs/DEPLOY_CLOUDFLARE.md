@@ -1,6 +1,6 @@
 # راهنمای استقرار سرور ورکر در Cloudflare (Cloudflare Worker Deployment)
 
-این راهنما آموزش گام‌به‌گام راه‌اندازی هسته **TWP v2.0 (Official Telegram WEB Proxy)** روی Cloudflare Workers را شرح می‌دهد. با استقرار این ورکر، مستقیماً لینک رسمی اتصال تلگرام (`tg://webproxy`) را بدون نیاز به هیچ سرور VPS دریافت خواهید کرد.
+این راهنما آموزش گام‌به‌گام راه‌اندازی هسته **TWP v2.2 (Official Telegram WEB Proxy)** روی Cloudflare Workers را شرح می‌دهد. با استقرار این ورکر، مستقیماً لینک رسمی اتصال تلگرام (`tg://webproxy`) را بدون نیاز به هیچ سرور VPS دریافت خواهید کرد.
 
 ---
 

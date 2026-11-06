@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⚡ TWP (Telegram Worker Proxy) Core v2.0
+# ⚡ TWP (Telegram Worker Proxy) Core v2.2
 
 **Official Telegram WEB Proxy Engine for Cloudflare Workers (Zero VPS Required)**  
 *موتور رسمی وب‌پروکسی تلگرام بر پایه ورکر کلادفلر — بدون نیاز به سرور VPS و تحویل مستقیم لینک اتصال*
@@ -12,13 +12,13 @@
 [![Deploy Bot](https://img.shields.io/badge/Telegram-Deployer_Bot-2CA5E0?style=flat&logo=telegram&logoColor=white)](https://t.me/qorvhexdeployer_bot)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-Channel-2CA5E0?style=flat&logo=telegram&logoColor=white)](https://t.me/Qorvhex_Channel)
 
-[معرفی هسته (FA)](#-معرفی-هسته-twp-core-v20) • [نصب سریع با ربات](#روش-اول-استقرار-سریع-و-خودکار-با-ربات-تلگرام-پیشنهادی) • [English Documentation](#-english-documentation) • [معماری (Architecture)](#-معماری-پروتکل-architecture) • [نحوه دریافت لینک و اتصال](#-دریافت-لینک-و-اتصال-مستقیم) • [استقرار سرورلس](#-استقرار-هسته-سرور-server-deployment) • [مشخصات پروتکل](#-مشخصات-فنی-پروتکل-protocol-spec) • [جامعه کاربری](#-ارتباط-و-جامعه-کاربری-community--updates)
+[معرفی هسته (FA)](#-معرفی-هسته-twp-core-v22) • [نصب سریع با ربات](#روش-اول-استقرار-سریع-و-خودکار-با-ربات-تلگرام-پیشنهادی) • [English Documentation](#-english-documentation) • [معماری (Architecture)](#-معماری-پروتکل-architecture) • [نحوه دریافت لینک و اتصال](#-دریافت-لینک-و-اتصال-مستقیم) • [استقرار سرورلس](#-استقرار-هسته-سرور-server-deployment) • [مشخصات پروتکل](#-مشخصات-فنی-پروتکل-protocol-spec) • [جامعه کاربری](#-ارتباط-و-جامعه-کاربری-community--updates)
 
 </div>
 
 ---
 
-## 📖 معرفی هسته (TWP Core v2.0)
+## 📖 معرفی هسته (TWP Core v2.2)
 
 پروژه **TWP (Telegram Worker Proxy)** یک هسته سرورلس سبک، مستقل و ۱۰۰٪ متن‌باز برای استقرار پروتکل رسمی **Telegram WEB Proxy** بر بستر شبکه توزیع‌شده Cloudflare Workers است.
 
@@ -30,6 +30,8 @@
 
 ## 🚀 ویژگی‌های کلیدی (Key Highlights)
 
+- **رابط کاربری مدرن Nothing OS:** داشبورد تعاملی با تم مشکی AMOLED، بافت ماتریسی (Dot-Matrix)، لهجه قرمز نمادین ناتینگ (`#D71921`) و ویجت‌های کپسولی Bento-box با پشتیبانی دو زبانه (FA/EN).
+- **آزمون‌های خودکار جامع (Unit & E2E Testing):** مجهز به لودر شبیه‌ساز سوکت‌های کلودفلر و ۱۰ تست اتوماتیک با `npm test`.
 - **بدون نیاز به سرور VPS (Zero VPS Cost):** اجرا به صورت ۱۰۰٪ سرورلس روی حساب رایگان Cloudflare Workers.
 - **تولید مستقیم لینک اتصال:** تحویل لینک استاندارد `tg://webproxy?server=...&secret=...` و `https://t.me/webproxy` با داشبورد تعاملی و کد QR.
 - **پشتیبانی نیتیو در کلاینت‌های تلگرام:** بدون نیاز به کامپایل کد اختصاصی یا کلاینت غیررسمی؛ تلگرام‌های رسمی مجهز به وب‌پروکسی مستقیماً به آن متصل می‌شوند.
@@ -155,15 +157,16 @@ npx wrangler deploy
 | **Protocol Specification** | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | قرارداد دقیق فریم‌های باینری، هدرهای کنترلی، و فرمول‌های محاسباتی HMAC-SHA256 |
 | **Architecture Specification** | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | بررسی مدل فنی، مزایای رقابتی در مقایسه با MTProxy و SOCKS5، و امنیت لایه انتقال |
 | **Deployment Guide** | [`docs/DEPLOY_CLOUDFLARE.md`](docs/DEPLOY_CLOUDFLARE.md) | راهنمای گام‌به‌گام استقرار روی کلادفلر در کمتر از ۱ دقیقه |
+| **Test Suite** | [`test/worker.test.mjs`](test/worker.test.mjs) | مجموعه آزمون‌های خودکار واحد و انتها-به-انتها با شبیه‌ساز سوکت |
 
 ---
 
 ## 🌐 English Documentation
 
 ### Overview
-**TWP (Telegram Worker Proxy) Core v2.0** is an open-source, serverless implementation of the official **Telegram WEB Proxy** wire contract (`tproxy-server`) engineered entirely for Cloudflare Workers. 
+**TWP (Telegram Worker Proxy) Core v2.2** is an open-source, serverless implementation of the official **Telegram WEB Proxy** wire contract (`tproxy-server`) engineered entirely for Cloudflare Workers. 
 
-Telegram's official WEB proxy routes MTProto traffic through an app-owned internal WebView carrier using standard HTTPS and WebSockets. **TWP v2.0** runs this entire relay architecture serverless within a single [`worker.js`](worker.js) script using `cloudflare:sockets` — eliminating the need for Linux VPS servers, Caddy configurations, or custom C++ client patching.
+Telegram's official WEB proxy routes MTProto traffic through an app-owned internal WebView carrier using standard HTTPS and WebSockets. **TWP v2.2** runs this entire relay architecture serverless within a single [`worker.js`](worker.js) script using `cloudflare:sockets` — eliminating the need for Linux VPS servers, Caddy configurations, or custom C++ client patching.
 
 ### Key Features
 - **Zero VPS Cost:** 100% serverless, zero maintenance, fully compatible with Cloudflare's free plan.
@@ -206,6 +209,25 @@ npx wrangler deploy
 </div>
 
 ---
+
+
+---
+
+## 🧪 تست و توسعه محلی (Testing & Development)
+
+پروژه TWP دارای سیستم آزمون‌های خودکار برای اعتبارسنجی توابع رمزنکاری، ساختار فریم‌ها و جریان ترافیک بدون نیاز به استقرار ابری است:
+
+```bash
+# ۱. اجرای آزمون‌های خودکار (10 تست E2E و Unit)
+npm test
+
+# ۲. اعتبارسنجی سینتکس و ساخت درای‌ران
+npm run lint
+
+# ۳. اجرای سرور توسعه محلی
+npm run dev
+```
+
 
 ## 📄 مجوز (License)
 

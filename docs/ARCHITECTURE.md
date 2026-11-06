@@ -1,4 +1,4 @@
-# TWP Technical Architecture (v2.0)
+# TWP Technical Architecture (v2.2)
 
 This document describes the internal engineering, data flow, and networking model of **TWP (Telegram Worker Proxy)** implementing the official Telegram WEB Proxy specification.
 

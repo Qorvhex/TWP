@@ -1,5 +1,5 @@
 /**
- * ⚡ TWP (Telegram Worker Proxy) Core Engine v2.0
+ * ⚡ TWP (Telegram Worker Proxy) Core Engine v2.2
  * High-Performance Serverless Telegram WEB Proxy Relay for Cloudflare Workers
  *
  * Implements the official Telegram WEB Proxy wire contract (tproxy v1):
@@ -18,8 +18,8 @@ import { connect } from 'cloudflare:sockets';
 // 1. PROTOCOL CONSTANTS & TELEGRAM DATACENTERS
 // ==================================================================================
 
-const BRIDGE_DOMAIN_LABEL = 'tdesktop-web-proxy-bridge-v1\n';
-const TOKEN_LABEL_PREFIX  = 'tgp-token-v1\0';
+const BRIDGE_DOMAIN_LABEL  = 'tdesktop-web-proxy-bridge-v1\n';
+const TOKEN_LABEL_PREFIX   = 'tgp-token-v1\0';
 const TOKEN_KEY_DERIVATION = 'tgp-token-key-v1';
 
 // Frame Types (Telegram WEB Proxy v1 Protocol)
@@ -31,29 +31,33 @@ const FRAME_PING    = 5;
 const FRAME_PONG    = 6;
 const FRAME_HELLO   = 0x10;
 const FRAME_WELCOME = 0x11;
+const FRAME_BYE     = 0x1f;
 
-// Flow Control & Buffer Boundaries
-const CHUNK_SIZE         = 64 * 1024;        // 64 KiB chunks
-const INITIAL_STREAM_WIN = 4 * 1024 * 1024;  // 4 MiB flow credit per stream
-const MAX_FRAME_PAYLOAD  = 1024 * 1024;      // 1 MiB max single frame payload
-const MAX_FRAMES_PER_MSG = 4096;
-const MAX_CARRIER_MSG    = 4 * 1024 * 1024;  // 4 MiB max WebSocket message
-const MAX_STREAMS_COUNT  = 48;               // Max concurrent logical streams per session
-const MAX_RETIRED_IDS    = 4096;
-const DEFAULT_DIAL_LIMIT = 45;               // Streams per lane before warm rollover
-const DIAL_TIMEOUT_MS    = 6000;             // TCP connect timeout
-const CARRIER_PING_MS    = 20000;            // 20s keep-alive & token renewal
+// Flow Control, Batching & Buffer Boundaries
+const CHUNK_SIZE              = 64 * 1024;        // 64 KiB chunks
+const MAX_DOWNLINK_BATCH      = 128 * 1024;       // 128 KiB coalesced WebSocket send batch
+const WS_HIGH_WATERMARK       = 2 * 1024 * 1024;  // 2 MiB WebSocket backpressure threshold
+const INITIAL_STREAM_WIN      = 4 * 1024 * 1024;  // 4 MiB flow credit per stream
+const WINDOW_FLUSH_THRESHOLD  = 64 * 1024;        // Immediate window grant threshold
+const MAX_FRAME_PAYLOAD       = 1024 * 1024;      // 1 MiB max single frame payload
+const MAX_FRAMES_PER_MSG      = 4096;
+const MAX_CARRIER_MSG         = 4 * 1024 * 1024;  // 4 MiB max WebSocket message
+const MAX_STREAMS_COUNT       = 48;               // Max concurrent logical streams per session
+const MAX_RETIRED_IDS         = 4096;
+const DEFAULT_DIAL_LIMIT      = 45;               // Streams per lane before warm rollover
+const DIAL_TIMEOUT_MS         = 4500;             // TCP connect timeout per endpoint
+const CARRIER_PING_MS         = 20000;            // 20s keep-alive & token renewal
 
-const TOKEN_TTL_BOOTSTRAP = 120;             // 2 minutes
-const TOKEN_TTL_SESSION   = 600;             // 10 minutes
-const TOKEN_TTL_RENEWAL   = 3600;            // 1 hour renewal grace
+const TOKEN_TTL_BOOTSTRAP = 120;                  // 2 minutes
+const TOKEN_TTL_SESSION   = 600;                  // 10 minutes
+const TOKEN_TTL_RENEWAL   = 3600;                 // 1 hour renewal grace
 
 /**
  * Official Telegram Datacenter IPv4 Endpoints (Standard Port 443).
- * Negative DC IDs represent media endpoints sharing the same IPs.
+ * Negative DC IDs represent media endpoints.
  */
 const TELEGRAM_DCS = {
-  1: ['149.154.175.50', '149.154.175.51'],
+  1: ['149.154.175.50', '149.154.175.51', '149.154.175.54'],
   2: ['149.154.167.50', '149.154.167.51', '149.154.167.92'],
   3: ['149.154.175.100', '149.154.175.101'],
   4: ['149.154.167.91', '149.154.167.92'],
@@ -72,36 +76,68 @@ const FORBIDDEN_WORDS = new Set([
 ]);
 
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
+
+// Pre-encoded static buffers for zero-allocation hot paths
+const TOKEN_PREFIX_BYTES    = textEncoder.encode(TOKEN_LABEL_PREFIX);
+const TOKEN_KEY_DERIV_BYTES = textEncoder.encode(TOKEN_KEY_DERIVATION);
+const HELLO_FRAME_BYTES     = Uint8Array.of(FRAME_HELLO, 0, 0, 0, 0, 0, 0, 1, 1);
+const WELCOME_FRAME_BYTES   = Uint8Array.of(FRAME_WELCOME, 0, 0, 0, 0, 0, 0, 0);
 
 // ==================================================================================
 // 2. BINARY & CRYPTOGRAPHIC PRIMITIVES
 // ==================================================================================
 
-function parseHex(hexStr) {
-  const bytes = new Uint8Array(hexStr.length / 2);
+const HEX_TABLE = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
+const HEX_LUT = new Int8Array(128).fill(-1);
+for (let i = 0; i < 10; i++) HEX_LUT[48 + i] = i;
+for (let i = 0; i < 6; i++) {
+  HEX_LUT[65 + i] = 10 + i;
+  HEX_LUT[97 + i] = 10 + i;
+}
+
+function toHex(bytes) {
+  let hex = '';
   for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hexStr.substr(i * 2, 2), 16);
+    hex += HEX_TABLE[bytes[i]];
+  }
+  return hex;
+}
+
+function parseHex(hexStr) {
+  const len = hexStr.length;
+  if (len % 2 !== 0) throw new Error('TWP: Invalid hex length');
+  const bytes = new Uint8Array(len >>> 1);
+  for (let i = 0, j = 0; i < len; i += 2, j++) {
+    const c1 = hexStr.charCodeAt(i);
+    const c2 = hexStr.charCodeAt(i + 1);
+    const hi = c1 < 128 ? HEX_LUT[c1] : -1;
+    const lo = c2 < 128 ? HEX_LUT[c2] : -1;
+    if (hi < 0 || lo < 0) throw new Error('TWP: Invalid hex character');
+    bytes[j] = (hi << 4) | lo;
   }
   return bytes;
 }
 
 function concatArrays(...arrays) {
   let length = 0;
-  for (const arr of arrays) length += arr.length;
+  for (let i = 0; i < arrays.length; i++) length += arrays[i].length;
   const result = new Uint8Array(length);
   let offset = 0;
-  for (const arr of arrays) {
-    result.set(arr, offset);
-    offset += arr.length;
+  for (let i = 0; i < arrays.length; i++) {
+    const arr = arrays[i];
+    if (arr.length > 0) {
+      result.set(arr, offset);
+      offset += arr.length;
+    }
   }
   return result;
 }
 
 function reverseBytes(bytes) {
-  const reversed = new Uint8Array(bytes.length);
-  for (let i = 0; i < bytes.length; i++) {
-    reversed[i] = bytes[bytes.length - 1 - i];
+  const len = bytes.length;
+  const reversed = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    reversed[i] = bytes[len - 1 - i];
   }
   return reversed;
 }
@@ -136,7 +172,10 @@ function timingSafeEquals(a, b) {
 
 function writeUint32BE(value) {
   const buffer = new Uint8Array(4);
-  new DataView(buffer.buffer).setUint32(0, value);
+  buffer[0] = value >>> 24;
+  buffer[1] = value >>> 16;
+  buffer[2] = value >>> 8;
+  buffer[3] = value;
   return buffer;
 }
 
@@ -147,21 +186,30 @@ function packFrame(type, streamId, payload) {
   frame[1] = streamId >>> 16;
   frame[2] = streamId >>> 8;
   frame[3] = streamId;
-  new DataView(frame.buffer).setUint32(4, payloadLen);
+  frame[4] = payloadLen >>> 24;
+  frame[5] = payloadLen >>> 16;
+  frame[6] = payloadLen >>> 8;
+  frame[7] = payloadLen;
   if (payloadLen > 0) frame.set(payload, 8);
   return frame;
+}
+
+function packFrameBatch(framesList) {
+  if (framesList.length === 1) return framesList[0];
+  return concatArrays(...framesList);
 }
 
 function unpackFrameBatch(bytes) {
   const frames = [];
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let cursor = 0;
-  while (cursor < bytes.length) {
-    if (frames.length >= MAX_FRAMES_PER_MSG || bytes.length - cursor < 8) {
+  const totalLen = bytes.length;
+  while (cursor < totalLen) {
+    if (frames.length >= MAX_FRAMES_PER_MSG || totalLen - cursor < 8) {
       throw new Error('TWP: Batch size error');
     }
     const size = view.getUint32(cursor + 4);
-    if (size > MAX_FRAME_PAYLOAD || cursor + 8 + size > bytes.length) {
+    if (size > MAX_FRAME_PAYLOAD || cursor + 8 + size > totalLen) {
       throw new Error('TWP: Invalid frame length');
     }
     frames.push({
@@ -177,7 +225,9 @@ function unpackFrameBatch(bytes) {
 
 function validateClientFrame(f) {
   if (f.id === 0) {
-    if (f.type !== FRAME_PONG || f.payload.length > 64) throw new Error('TWP: Invalid control frame');
+    if ((f.type !== FRAME_PONG && f.type !== FRAME_BYE) || f.payload.length > 64) {
+      throw new Error('TWP: Invalid control frame');
+    }
     return;
   }
   if (f.type === FRAME_OPEN || f.type === FRAME_CLOSE) {
@@ -194,7 +244,7 @@ function validateClientFrame(f) {
 }
 
 // ==================================================================================
-// 3. WEB CRYPTO PRIMITIVES (HMAC & AES-256-CTR)
+// 3. WEB CRYPTO PRIMITIVES (HMAC & FAST 32-BIT AES-256-CTR)
 // ==================================================================================
 
 async function createHmacKey(rawBytes) {
@@ -211,11 +261,19 @@ async function computeSha256(data) {
 
 function incrementCounter128(initialIv, blockOffset) {
   const counter = initialIv.slice();
-  let carry = blockOffset;
-  for (let i = 15; i >= 0 && carry > 0; i--) {
-    const val = counter[i] + (carry % 256);
-    counter[i] = val & 255;
-    carry = Math.floor(carry / 256) + (val >> 8);
+  if (blockOffset === 0) return counter;
+  const view = new DataView(counter.buffer, counter.byteOffset, 16);
+  let carry = blockOffset >>> 0;
+  let highCarry = Math.floor(blockOffset / 0x100000000) >>> 0;
+
+  for (let wordIdx = 3; wordIdx >= 0 && (carry > 0 || highCarry > 0); wordIdx--) {
+    const bytePos = wordIdx * 4;
+    const current = view.getUint32(bytePos, false);
+    const addend = wordIdx === 3 ? carry : wordIdx === 2 ? carry + highCarry : carry;
+    const sum = current + addend;
+    view.setUint32(bytePos, sum >>> 0, false);
+    carry = Math.floor(sum / 0x100000000);
+    if (wordIdx === 2) highCarry = 0;
   }
   return counter;
 }
@@ -227,17 +285,19 @@ async function createAesCtrCipher(keyBytes, iv) {
 
 async function applyAesCtr(cipher, byteOffset, inputData) {
   if (inputData.length === 0) return inputData;
-  const remainder = byteOffset % 16;
+  const remainder = byteOffset & 15;
   const blockCounter = incrementCounter128(cipher.iv, Math.floor(byteOffset / 16));
-  let source = inputData;
-  if (remainder !== 0) {
-    source = new Uint8Array(remainder + inputData.length);
-    source.set(inputData, remainder);
+  if (remainder === 0) {
+    return new Uint8Array(
+      await crypto.subtle.encrypt({ name: 'AES-CTR', counter: blockCounter, length: 128 }, cipher.cryptoKey, inputData)
+    );
   }
+  const source = new Uint8Array(remainder + inputData.length);
+  source.set(inputData, remainder);
   const encrypted = new Uint8Array(
     await crypto.subtle.encrypt({ name: 'AES-CTR', counter: blockCounter, length: 128 }, cipher.cryptoKey, source)
   );
-  return remainder !== 0 ? encrypted.subarray(remainder) : encrypted;
+  return encrypted.subarray(remainder);
 }
 
 // ==================================================================================
@@ -256,7 +316,11 @@ function resolveConfig(env) {
   const rawSecret = secretInput.trim().toLowerCase() || '000102030405060708090a0b0c0d0e0f';
 
   if (!cachedConfig || cachedConfig.raw !== rawSecret) {
-    cachedConfig = { raw: rawSecret, value: buildConfigKeys(rawSecret) };
+    const promise = buildConfigKeys(rawSecret).catch((err) => {
+      if (cachedConfig && cachedConfig.raw === rawSecret) cachedConfig = null;
+      throw err;
+    });
+    cachedConfig = { raw: rawSecret, value: promise };
   }
   return cachedConfig.value;
 }
@@ -265,15 +329,19 @@ async function buildConfigKeys(rawSecret) {
   const match = /^(dd)?([0-9a-f]{32})$/.exec(rawSecret);
   if (!match) return null;
   const fullSecretBytes = parseHex(rawSecret);
+  const secret16 = parseHex(match[2]);
+  const isPadded = Boolean(match[1]);
   const capabilityKey = await createHmacKey(fullSecretBytes);
+  const capabilityKey16 = isPadded ? await createHmacKey(secret16) : capabilityKey;
   const tokenMasterKey = await createHmacKey(
-    await computeHmac(capabilityKey, textEncoder.encode(TOKEN_KEY_DERIVATION))
+    await computeHmac(capabilityKey, TOKEN_KEY_DERIV_BYTES)
   );
   return {
     fullBytes: fullSecretBytes,
-    secret16: parseHex(match[2]),
-    isPadded: Boolean(match[1]),
+    secret16,
+    isPadded,
     capabilityKey,
+    capabilityKey16,
     tokenMasterKey,
   };
 }
@@ -288,19 +356,24 @@ async function issueStatelessToken(config, kind, epochSec = Math.floor(Date.now(
   crypto.getRandomValues(nonce);
   new DataView(nonce.buffer).setUint32(0, epochSec);
   const mac = (
-    await computeHmac(config.tokenMasterKey, concatArrays(textEncoder.encode(TOKEN_LABEL_PREFIX), Uint8Array.of(kind), nonce))
+    await computeHmac(config.tokenMasterKey, concatArrays(TOKEN_PREFIX_BYTES, Uint8Array.of(kind), nonce))
   ).subarray(0, 16);
   return toBase64Url(concatArrays(nonce, mac));
 }
 
 async function verifyStatelessToken(config, tokenStr, kind, maxTtl, epochSec = Math.floor(Date.now() / 1000)) {
   if (typeof tokenStr !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(tokenStr)) return false;
-  const rawBytes = fromBase64Url(tokenStr);
+  let rawBytes;
+  try {
+    rawBytes = fromBase64Url(tokenStr);
+  } catch {
+    return false;
+  }
   if (rawBytes.length !== 32) return false;
   const nonce = rawBytes.subarray(0, 16);
   const providedMac = rawBytes.subarray(16);
   const expectedMac = (
-    await computeHmac(config.tokenMasterKey, concatArrays(textEncoder.encode(TOKEN_LABEL_PREFIX), Uint8Array.of(kind), nonce))
+    await computeHmac(config.tokenMasterKey, concatArrays(TOKEN_PREFIX_BYTES, Uint8Array.of(kind), nonce))
   ).subarray(0, 16);
 
   if (!timingSafeEquals(providedMac, expectedMac)) return false;
@@ -310,13 +383,21 @@ async function verifyStatelessToken(config, tokenStr, kind, maxTtl, epochSec = M
 
 function extractBearerToken(request) {
   const authHeader = request.headers.get('Authorization') || '';
-  const match = /^Bearer\s+([A-Za-z0-9_-]{43})$/i.exec(authHeader);
+  const match = /^Bearer\s+([A-Za-z0-9_-]{43})$/i.exec(authHeader.trim());
   return match ? match[1] : '';
 }
 
 // ==================================================================================
 // 5. IN-WORKER MTPROTO OBFUSCATED2 RELAY ENGINE
 // ==================================================================================
+
+function normalizeDcId(rawDcId) {
+  if (rawDcId === 0) return 2;
+  let absDc = Math.abs(rawDcId);
+  if (absDc > 10000) absDc = absDc % 10000;
+  if (!TELEGRAM_DCS[absDc]) return null;
+  return rawDcId < 0 ? -absDc : absDc;
+}
 
 /**
  * Decrypts the 64-byte client Obfuscated2 handshake header using the shared secret.
@@ -332,14 +413,15 @@ async function parseClientHandshake(config, handshakeBuffer) {
   const decryptedHeader = await applyAesCtr(clientUpCipher, 0, handshakeBuffer);
 
   const transportTag = new DataView(decryptedHeader.buffer, decryptedHeader.byteOffset + 56, 4).getUint32(0);
-  const datacenterId = new DataView(decryptedHeader.buffer, decryptedHeader.byteOffset + 60, 2).getInt16(0, true);
+  const rawDcId = new DataView(decryptedHeader.buffer, decryptedHeader.byteOffset + 60, 2).getInt16(0, true);
+  const normalizedDc = normalizeDcId(rawDcId);
 
   return {
     clientUpCipher,
     clientDownKey,
     clientDownIv,
     transportTag,
-    datacenterId,
+    datacenterId: normalizedDc !== null ? normalizedDc : rawDcId,
   };
 }
 
@@ -352,18 +434,25 @@ async function generateDcHandshake(clientHandshake) {
   while (true) {
     const dcInit = new Uint8Array(64);
     crypto.getRandomValues(dcInit);
-    const firstWordLE = new DataView(dcInit.buffer).getUint32(0, true);
-    const firstWordBE = new DataView(dcInit.buffer).getUint32(0, false);
-    const secondWord = new DataView(dcInit.buffer).getUint32(4, false);
+    const view = new DataView(dcInit.buffer);
+    const firstWordLE = view.getUint32(0, true);
+    const firstWordBE = view.getUint32(0, false);
+    const secondWord = view.getUint32(4, false);
 
-    if (dcInit[0] === 0xef || FORBIDDEN_WORDS.has(firstWordLE) || FORBIDDEN_WORDS.has(firstWordBE) || secondWord === 0) {
+    if (
+      dcInit[0] === 0xef ||
+      (dcInit[0] === 0x16 && dcInit[1] === 0x03) ||
+      FORBIDDEN_WORDS.has(firstWordLE) ||
+      FORBIDDEN_WORDS.has(firstWordBE) ||
+      secondWord === 0
+    ) {
       continue;
     }
 
     // Embed client's download keystream into DC's init header
     dcInit.set(reverseBytes(concatArrays(clientHandshake.clientDownKey, clientHandshake.clientDownIv)), 8);
-    new DataView(dcInit.buffer).setUint32(56, clientHandshake.transportTag);
-    new DataView(dcInit.buffer).setInt16(60, clientHandshake.datacenterId, true);
+    view.setUint32(56, clientHandshake.transportTag);
+    view.setInt16(60, clientHandshake.datacenterId, true);
 
     const dcUpCipher = await createAesCtrCipher(dcInit.slice(8, 40), dcInit.slice(40, 56));
     const sealed = await applyAesCtr(dcUpCipher, 0, dcInit);
@@ -374,23 +463,48 @@ async function generateDcHandshake(clientHandshake) {
   }
 }
 
+function safeCloseSocket(sock) {
+  if (!sock) return;
+  try {
+    sock.close();
+  } catch {}
+}
+
+/**
+ * Connects to a Telegram Datacenter using reliable sequential failover without socket leakage.
+ */
 async function connectToDatacenter(dcId) {
-  const targetEndpoints = TELEGRAM_DCS[Math.abs(dcId)];
-  if (!targetEndpoints || targetEndpoints.length === 0) {
+  const normalized = normalizeDcId(dcId);
+  const absDc = normalized !== null ? Math.abs(normalized) : Math.abs(dcId);
+  const endpoints = TELEGRAM_DCS[absDc];
+  if (!endpoints || endpoints.length === 0) {
     throw new Error(`TWP: Unsupported DC ID ${dcId}`);
   }
   let lastError = null;
-  for (const hostname of targetEndpoints) {
+  for (const hostname of endpoints) {
+    let timerId = null;
+    let tcpSocket = null;
     try {
-      const tcpSocket = connect({ hostname, port: 443 }, { secureTransport: 'off', allowHalfOpen: false });
+      tcpSocket = connect({ hostname, port: 443 }, { secureTransport: 'off', allowHalfOpen: false });
+      if (tcpSocket.closed && typeof tcpSocket.closed.catch === 'function') {
+        tcpSocket.closed.catch(() => {});
+      }
       if (tcpSocket.opened) {
+        if (typeof tcpSocket.opened.catch === 'function') {
+          tcpSocket.opened.catch(() => {});
+        }
         await Promise.race([
           tcpSocket.opened,
-          new Promise((_, reject) => setTimeout(() => reject(new Error('TWP: DC Connect Timeout')), DIAL_TIMEOUT_MS)),
+          new Promise((_, reject) => {
+            timerId = setTimeout(() => reject(new Error('TWP: DC Connect Timeout')), DIAL_TIMEOUT_MS);
+          }),
         ]);
       }
+      if (timerId) clearTimeout(timerId);
       return tcpSocket;
     } catch (err) {
+      if (timerId) clearTimeout(timerId);
+      safeCloseSocket(tcpSocket);
       lastError = err;
     }
   }
@@ -402,7 +516,7 @@ async function connectToDatacenter(dcId) {
 // ==================================================================================
 
 function handleCarrierSession(webSocket, config, options) {
-  webSocket.binaryType = 'arraybuffer';
+  try { webSocket.binaryType = 'arraybuffer'; } catch {}
   const activeStreams = new Map();
   const retiredStreamIds = new Set();
   let totalDials = 0;
@@ -426,14 +540,18 @@ function handleCarrierSession(webSocket, config, options) {
       stream.wakeResolver = null;
       resolver();
     }
-    try { stream.tcpSocket?.close(); } catch {}
     try { stream.streamReader?.cancel().catch(() => {}); } catch {}
+    safeCloseSocket(stream.tcpSocket);
+    stream.tcpSocket = null;
   };
 
   const terminateSession = (closeCode) => {
     if (isClosed) return;
     isClosed = true;
-    if (pingIntervalId) clearInterval(pingIntervalId);
+    if (pingIntervalId) {
+      clearInterval(pingIntervalId);
+      pingIntervalId = null;
+    }
     for (const stream of activeStreams.values()) {
       closeStreamSocket(stream);
     }
@@ -445,22 +563,28 @@ function handleCarrierSession(webSocket, config, options) {
     if (stream.isTerminated) return;
     closeStreamSocket(stream);
     activeStreams.delete(stream.streamId);
-    if (notifyPeer) {
+    if (notifyPeer && !isClosed) {
       sendRawBytes(packFrame(FRAME_CLOSE, stream.streamId));
     }
   };
 
+  const flushWindowGrant = (stream) => {
+    stream.isWindowGrantScheduled = false;
+    if (stream.isTerminated || isClosed || stream.pendingWindowGrant <= 0) return;
+    const amount = stream.pendingWindowGrant;
+    stream.pendingWindowGrant = 0;
+    sendRawBytes(packFrame(FRAME_WINDOW, stream.streamId, writeUint32BE(amount)));
+  };
+
   const grantFlowWindow = (stream, bytesConsumed) => {
     stream.pendingWindowGrant += bytesConsumed;
+    if (stream.pendingWindowGrant >= WINDOW_FLUSH_THRESHOLD) {
+      flushWindowGrant(stream);
+      return;
+    }
     if (stream.isWindowGrantScheduled) return;
     stream.isWindowGrantScheduled = true;
-    queueMicrotask(() => {
-      stream.isWindowGrantScheduled = false;
-      if (stream.isTerminated || isClosed || stream.pendingWindowGrant <= 0) return;
-      const amount = stream.pendingWindowGrant;
-      stream.pendingWindowGrant = 0;
-      sendRawBytes(packFrame(FRAME_WINDOW, stream.streamId, writeUint32BE(amount)));
-    });
+    queueMicrotask(() => flushWindowGrant(stream));
   };
 
   /**
@@ -469,54 +593,92 @@ function handleCarrierSession(webSocket, config, options) {
    */
   const pumpDownlink = async (stream) => {
     try {
-      while (true) {
+      while (!stream.isTerminated && !isClosed) {
+        if (typeof webSocket.bufferedAmount === 'number' && webSocket.bufferedAmount > WS_HIGH_WATERMARK) {
+          await new Promise((r) => setTimeout(r, 15));
+          if (stream.isTerminated || isClosed) return;
+        }
+
         const { value: chunk, done: isDone } = await stream.streamReader.read();
-        if (isDone || stream.isTerminated) break;
-        for (let offset = 0; offset < chunk.length; ) {
-          while (stream.outboundCredit <= 0 && !stream.isTerminated) {
+        if (isDone || stream.isTerminated || isClosed) break;
+        if (!chunk || chunk.length === 0) continue;
+
+        let offset = 0;
+        const framesToBatch = [];
+        let batchedBytes = 0;
+
+        while (offset < chunk.length) {
+          while (stream.outboundCredit <= 0 && !stream.isTerminated && !isClosed) {
+            if (framesToBatch.length > 0) {
+              sendRawBytes(packFrameBatch(framesToBatch.splice(0, framesToBatch.length)));
+              batchedBytes = 0;
+            }
             await new Promise((resolve) => (stream.wakeResolver = resolve));
           }
-          if (stream.isTerminated) return;
+          if (stream.isTerminated || isClosed) return;
+
           const sendLen = Math.min(CHUNK_SIZE, chunk.length - offset, stream.outboundCredit);
           stream.outboundCredit -= sendLen;
-          sendRawBytes(packFrame(FRAME_DATA, stream.streamId, chunk.subarray(offset, offset + sendLen)));
+          const packed = packFrame(FRAME_DATA, stream.streamId, chunk.subarray(offset, offset + sendLen));
+          framesToBatch.push(packed);
+          batchedBytes += packed.length;
           offset += sendLen;
+
+          if (batchedBytes >= MAX_DOWNLINK_BATCH) {
+            sendRawBytes(packFrameBatch(framesToBatch.splice(0, framesToBatch.length)));
+            batchedBytes = 0;
+          }
+        }
+
+        if (framesToBatch.length > 0) {
+          sendRawBytes(packFrameBatch(framesToBatch));
         }
       }
     } catch {}
     teardownStream(stream, true);
   };
 
-  const initializeDatacenterConnection = async (stream) => {
+  const initializeDatacenterConnection = async (stream, initialPayloadAfterHandshake) => {
     const clientHandshake = await parseClientHandshake(config, stream.handshakeBuffer);
     if (
       !PROTOCOL_TAGS.has(clientHandshake.transportTag) ||
       (config.isPadded && clientHandshake.transportTag !== 0xdddddddd) ||
-      !TELEGRAM_DCS[Math.abs(clientHandshake.datacenterId)]
+      normalizeDcId(clientHandshake.datacenterId) === null
     ) {
       throw new Error('TWP: Handshake header rejected');
     }
 
-    const dcHandshake = await generateDcHandshake(clientHandshake);
-    stream.tcpSocket = await connectToDatacenter(clientHandshake.datacenterId);
-    if (stream.isTerminated) {
-      closeStreamSocket(stream);
+    const [dcHandshake, tcpSocket] = await Promise.all([
+      generateDcHandshake(clientHandshake),
+      connectToDatacenter(clientHandshake.datacenterId),
+    ]);
+
+    if (stream.isTerminated || isClosed) {
+      safeCloseSocket(tcpSocket);
       return;
     }
 
-    stream.streamWriter = stream.tcpSocket.writable.getWriter();
-    stream.streamReader = stream.tcpSocket.readable.getReader();
-
-    await stream.streamWriter.write(dcHandshake.wirePayload);
+    stream.tcpSocket = tcpSocket;
+    stream.streamWriter = tcpSocket.writable.getWriter();
+    stream.streamReader = tcpSocket.readable.getReader();
     stream.clientCipher = clientHandshake.clientUpCipher;
     stream.dcCipher = dcHandshake.dcUpCipher;
-    stream.isHandshakeComplete = true;
 
+    if (initialPayloadAfterHandshake && initialPayloadAfterHandshake.length > 0) {
+      const plaintext = await applyAesCtr(stream.clientCipher, stream.streamByteOffset, initialPayloadAfterHandshake);
+      const reEncrypted = await applyAesCtr(stream.dcCipher, stream.streamByteOffset, plaintext);
+      stream.streamByteOffset += initialPayloadAfterHandshake.length;
+      await stream.streamWriter.write(concatArrays(dcHandshake.wirePayload, reEncrypted));
+    } else {
+      await stream.streamWriter.write(dcHandshake.wirePayload);
+    }
+
+    stream.isHandshakeComplete = true;
     pumpDownlink(stream);
   };
 
   const processUplinkPayload = async (stream, chunk) => {
-    if (stream.isTerminated) return;
+    if (stream.isTerminated || isClosed) return;
     let remainingChunk = chunk;
 
     if (!stream.isHandshakeComplete) {
@@ -529,8 +691,11 @@ function handleCarrierSession(webSocket, config, options) {
         grantFlowWindow(stream, chunk.length);
         return;
       }
-      await initializeDatacenterConnection(stream);
-      if (stream.isTerminated) return;
+      await initializeDatacenterConnection(stream, remainingChunk);
+      if (!stream.isTerminated) {
+        grantFlowWindow(stream, chunk.length);
+      }
+      return;
     }
 
     if (remainingChunk.length > 0) {
@@ -543,7 +708,10 @@ function handleCarrierSession(webSocket, config, options) {
   };
 
   const handleIncomingFrame = (f) => {
-    if (f.id === 0) return;
+    if (f.id === 0) {
+      if (f.type === FRAME_BYE) terminateSession(1000);
+      return;
+    }
 
     if (f.type === FRAME_OPEN) {
       if (retiredStreamIds.has(f.id)) {
@@ -618,22 +786,27 @@ function handleCarrierSession(webSocket, config, options) {
           return terminateSession(4001);
         }
       }
+      let byteView;
       if (ArrayBuffer.isView(data)) {
-        data = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+        byteView = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      } else if (data instanceof ArrayBuffer) {
+        byteView = new Uint8Array(data);
+      } else {
+        return terminateSession(4001);
       }
-      if (!(data instanceof ArrayBuffer) || data.byteLength === 0 || data.byteLength > MAX_CARRIER_MSG) {
+      if (byteView.byteLength === 0 || byteView.byteLength > MAX_CARRIER_MSG) {
         return terminateSession(4001);
       }
       let frames;
       try {
-        frames = unpackFrameBatch(new Uint8Array(data));
-        frames.forEach(validateClientFrame);
+        frames = unpackFrameBatch(byteView);
+        for (let i = 0; i < frames.length; i++) validateClientFrame(frames[i]);
       } catch {
         return terminateSession(4001);
       }
-      for (const f of frames) {
+      for (let i = 0; i < frames.length; i++) {
         if (isClosed) return;
-        handleIncomingFrame(f);
+        handleIncomingFrame(frames[i]);
       }
     }).catch(() => {
       terminateSession(4001);
@@ -645,6 +818,7 @@ function handleCarrierSession(webSocket, config, options) {
 
   if (options.pingMs) {
     pingIntervalId = setInterval(() => {
+      if (isClosed) return;
       issueStatelessToken(config, 2).then((sessionToken) => {
         sendRawBytes(packFrame(FRAME_PING, 0, textEncoder.encode(sessionToken)));
       }, () => {});
@@ -668,14 +842,14 @@ const found=/^#android=([A-Za-z0-9_-]{43})$/.exec(location.hash);
 const androidNonce=found?found[1]:'';
 history.replaceState(null,'',location.pathname);
 const QUEUE_LIMIT=33554432,MESSAGE_LIMIT=262144,BUFFER_LIMIT=4194304,FRAME_LIMIT=4096,PAYLOAD_LIMIT=1048576;
-const WARM_AT=Math.max(1,DIALS-12),SWITCH_AT=Math.max(1,DIALS-2),QUIET_MS=65000,TRIES=3,DEATHS=4,DEATH_WINDOW_MS=30000;
+const WARM_AT=Math.max(1,DIALS-12),SWITCH_AT=Math.max(1,DIALS-2),QUIET_MS=60000,CONNECT_TIMEOUT_MS=9000,TRIES=3,DEATHS=4,DEATH_WINDOW_MS=30000;
 const HELLO=[16,0,0,0,0,0,0,1,1];
 let closed=false,started=false,connected=false,token=BOOT,port=null,queued=0,cur=null,next=null,watch=0;
 const lanes=new Set(),route=new Map(),deaths=[];
 const post=(value)=>{if(port&&!closed)port.postMessage(value)};
 const status=(state)=>post({t:'status',state});
 const traffic=(up,down)=>post({t:'traffic',up,down});
-const request=(method,token,body)=>({method,body,keepalive:method==='DELETE',mode:'same-origin',credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer',headers:Object.assign(token?{Authorization:'Bearer '+token}:{},body?{'Content-Type':'application/octet-stream'}:{})});
+const request=(method,token,body,signal)=>({method,body,signal,keepalive:method==='DELETE',mode:'same-origin',credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer',headers:Object.assign(token?{Authorization:'Bearer '+token}:{},body?{'Content-Type':'application/octet-stream'}:{})});
 const pause=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));
 function split(buffer){
  const view=new DataView(buffer),frames=[];let at=0;
@@ -707,7 +881,7 @@ function close(notify){
  if(port&&port.close)port.close();
 }
 function makeLane(){
- const lane={ws:null,ready:false,dead:false,opens:0,streams:new Set(),out:[],heard:0,pinged:false,timer:0};
+ const lane={ws:null,ready:false,dead:false,opens:0,streams:new Set(),out:[],heard:Date.now(),timer:0};
  lanes.add(lane);return lane;
 }
 function shut(lane){
@@ -726,7 +900,7 @@ function lost(lane){
  for(const id of lane.streams){if(route.get(id)===lane)route.delete(id);post(frameOf(3,id))}
  lane.streams.clear();
  const now=Date.now();deaths.push(now);
- while(now-deaths[0]>DEATH_WINDOW_MS)deaths.shift();
+ while(deaths.length&&now-deaths[0]>DEATH_WINDOW_MS)deaths.shift();
  if(deaths.length>=DEATHS){fail();return}
  if(connected&&!cur)warm();
 }
@@ -735,18 +909,22 @@ function retire(lane){
 }
 function openSocket(lane,session){
  return new Promise((resolve,reject)=>{
-  const ws=new WebSocket(BASE.replace(/^https:/,'wss:')+'api/v1/ws','tproxy-v1.'+session);
+  const ws=new WebSocket(BASE.replace(/^http/,'ws')+'api/v1/ws','tproxy-v1.'+session);
   lane.ws=ws;ws.binaryType='arraybuffer';
-  ws.onopen=()=>{if(lane.ws!==ws||lane.dead){reject(new Error('gone'));return}lane.ready=true;lane.heard=Date.now();resolve()};
-  ws.onerror=()=>{if(!lane.ready)reject(new Error('socket'))};
-  ws.onclose=()=>{if(lane.ws!==ws)return;if(lane.ready)lost(lane);else reject(new Error('socket'))};
+  const timer=setTimeout(()=>{if(!lane.ready){try{ws.close()}catch(e){}reject(new Error('timeout'))}},CONNECT_TIMEOUT_MS);
+  ws.onopen=()=>{clearTimeout(timer);if(lane.ws!==ws||lane.dead){reject(new Error('gone'));return}lane.ready=true;lane.heard=Date.now();resolve()};
+  ws.onerror=()=>{if(!lane.ready){clearTimeout(timer);reject(new Error('socket'))}};
+  ws.onclose=()=>{clearTimeout(timer);if(lane.ws!==ws)return;if(lane.ready)lost(lane);else reject(new Error('socket'))};
   ws.onmessage=(event)=>{if(lane.ws===ws)fromRelay(lane,event.data)};
  });
 }
 async function connectLane(lane,hello,tries){
  for(let i=1;;i++){
+  let ctrl=null,tid=0;
   try{
-   const response=await fetch(BASE+'api/v1/session',request('POST',token,hello));
+   if(typeof AbortController!=='undefined'){ctrl=new AbortController();tid=setTimeout(()=>ctrl.abort(),CONNECT_TIMEOUT_MS)}
+   const response=await fetch(BASE+'api/v1/session',request('POST',token,hello,ctrl?ctrl.signal:undefined));
+   if(tid)clearTimeout(tid);
    if(response.status!==200||response.headers.get('X-Carrier-Mode')!=='websocket')throw new Error(response.status===404?'refused':'rejected');
    const session=response.headers.get('X-Session-Token')||'';
    if(!session)throw new Error('token');
@@ -756,9 +934,10 @@ async function connectLane(lane,hello,tries){
    await openSocket(lane,session);
    return welcome;
   }catch(e){
+   if(tid)clearTimeout(tid);
    if(lane.dead||i>=tries||e.message==='refused')throw e;
    try{if(lane.ws)lane.ws.close()}catch(x){}
-   await pause(800*i);
+   await pause(500*i);
   }
  }
 }
@@ -773,13 +952,15 @@ function warm(){
  const lane=makeLane();next=lane;
  connectLane(lane,new Uint8Array(HELLO).buffer,TRIES).then((welcome)=>{if(welcome&&!closed&&!lane.dead)promote(lane)},()=>{
   if(closed)return;
-  if(!cur||cur.opens>=SWITCH_AT){fail();return}
+  if(!cur||cur.opens>=DIALS){fail();return}
   lost(lane);
  });
 }
 function laneFor(){
  if(cur&&cur.opens<SWITCH_AT)return cur;
  warm();
+ if(next&&next.ready)return next;
+ if(cur&&cur.opens<DIALS)return cur;
  return next;
 }
 function send(lane,item){
@@ -840,20 +1021,19 @@ function fromRelay(lane,data){
 function ping(lane,item){
  const echo=new Uint8Array(item,8);
  if(echo.length>64)return;
- lane.pinged=true;
  const text=String.fromCharCode.apply(null,echo);
  if(/^[A-Za-z0-9_-]{43}$/.test(text))token=text;
  send(lane,frameOf(6,0,echo));
 }
 function check(){
  const now=Date.now();
- for(const lane of lanes)if(lane.ready&&lane.pinged&&now-lane.heard>QUIET_MS)lost(lane);
+ for(const lane of lanes)if(lane.ready&&now-lane.heard>QUIET_MS)lost(lane);
 }
 async function start(hello){
  status('connecting');
  const lane=makeLane();next=lane;
  try{
-  const welcome=await connectLane(lane,hello,1);
+  const welcome=await connectLane(lane,hello,TRIES);
   if(!welcome||closed)return;
   connected=true;
   promote(lane);
@@ -954,15 +1134,6 @@ function renderBridgeHtml(hostname, bootstrapToken, maxDials) {
   });
 }
 
-
-function toHex(bytes) {
-  let hex = '';
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, '0');
-  }
-  return hex;
-}
-
 const qriousCode = `/*! QRious v4.0.2 | (C) 2017 Alasdair Mercer | GPL v3 License
 Based on jsqrencode | (C) 2010 tz@execpc.com | GPL v3 License
 */
@@ -971,7 +1142,7 @@ Based on jsqrencode | (C) 2010 tz@execpc.com | GPL v3 License
 //# sourceMappingURL=qrious.min.js.map`;
 
 /**
- * Renders an ultra-modern AMOLED Dark, responsive, bilingual (Persian & English)
+ * Renders the AMOLED Dark, responsive, bilingual (Persian & English)
  * dashboard with self-contained QR code generation and one-click Telegram connect.
  */
 function renderTwpDashboard(hostname, secretHex) {
@@ -983,289 +1154,640 @@ function renderTwpDashboard(hostname, secretHex) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>⚡ TWP Core v2.0 | Telegram WEB Proxy</title>
+  <title>⚡ TWP Core v2.2 | Telegram WEB Proxy</title>
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Vazirmatn:wght@400;500;700;900&display=swap');
+
     :root {
       --bg: #000000;
-      --card-bg: #070a10;
-      --card-hover: #0b111c;
-      --border: rgba(255, 255, 255, 0.08);
-      --border-focus: rgba(0, 210, 255, 0.4);
-      --accent: #00d2ff;
-      --accent-grad: linear-gradient(135deg, #00d2ff 0%, #0070f3 100%);
-      --tg-blue: #229ED9;
-      --tg-grad: linear-gradient(135deg, #229ED9 0%, #1778b0 100%);
-      --success: #10b981;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
-      --text-dim: #64748b;
-      --code-bg: #030508;
+      --card-bg: #0c0c0c;
+      --widget-bg: #141414;
+      --widget-border: #242424;
+      --widget-hover: #383838;
+      --accent-red: #D71921;
+      --accent-red-glow: rgba(215, 25, 33, 0.3);
+      --text: #ffffff;
+      --text-muted: #a3a3a3;
+      --text-dim: #777777;
+      --mono-font: 'Space Mono', SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+      --main-font: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Tahoma, Arial, sans-serif;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html, body {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
+    }
+
     body {
       background-color: var(--bg);
-      background-image: 
-        radial-gradient(circle at 50% 0%, rgba(0, 210, 255, 0.08) 0%, transparent 50%),
-        radial-gradient(circle at 80% 80%, rgba(34, 158, 217, 0.05) 0%, transparent 40%);
+      background-image: radial-gradient(rgba(255, 255, 255, 0.12) 1px, transparent 1px);
+      background-size: 16px 16px;
       color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Vazirmatn", Tahoma, sans-serif;
+      font-family: var(--main-font);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 1.25rem 1rem;
-      overflow-x: hidden;
+      padding: 1.5rem 1rem;
+      line-height: 1.5;
     }
+
+    [dir="ltr"] {
+      --main-font: var(--mono-font);
+    }
+
+    /* Prevent Persian letters from disconnecting by clearing letter-spacing in RTL */
+    [dir="rtl"] .detail-label,
+    [dir="rtl"] .guide-header,
+    [dir="rtl"] h1,
+    [dir="rtl"] .desc,
+    [dir="rtl"] .status-badge,
+    [dir="rtl"] .qr-caption,
+    [dir="rtl"] .btn-lbl {
+      letter-spacing: normal !important;
+      font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Tahoma, Arial, sans-serif !important;
+    }
+
     .container {
       width: 100%;
-      max-width: 580px;
+      max-width: 480px;
       margin: 0 auto;
+      box-sizing: border-box;
     }
+
+    /* Header Bar: Status & Language */
     .header-bar {
       display: flex;
-      align-items: center;
       justify-content: space-between;
-      margin-bottom: 1.25rem;
+      align-items: center;
+      margin-bottom: 1rem;
+      gap: 0.75rem;
+      width: 100%;
     }
+
     .status-badge {
       display: inline-flex;
       align-items: center;
       gap: 0.5rem;
-      background: rgba(16, 185, 129, 0.1);
-      border: 1px solid rgba(16, 185, 129, 0.25);
-      color: var(--success);
-      padding: 0.35rem 0.75rem;
+      background: var(--card-bg);
+      border: 1px solid var(--widget-border);
+      padding: 0.4rem 0.85rem;
       border-radius: 9999px;
-      font-size: 0.8rem;
-      font-weight: 600;
+      font-size: 0.75rem;
+      font-family: var(--mono-font);
+      color: var(--text-muted);
     }
+
     .pulse-dot {
-      width: 7px;
-      height: 7px;
+      width: 8px;
+      height: 8px;
+      background: var(--accent-red);
       border-radius: 50%;
-      background: var(--success);
-      box-shadow: 0 0 8px var(--success);
-      animation: pulse 2s infinite;
+      box-shadow: 0 0 10px var(--accent-red-glow), 0 0 4px var(--accent-red);
+      animation: pulse 2s infinite ease-in-out;
+      flex-shrink: 0;
     }
+
     @keyframes pulse {
       0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.5; transform: scale(0.85); }
+      50% { opacity: 0.4; transform: scale(0.85); }
     }
+
     .lang-toggle {
       display: inline-flex;
-      background: rgba(255, 255, 255, 0.06);
-      border: 1px solid var(--border);
-      border-radius: 0.5rem;
-      padding: 2px;
-      gap: 2px;
+      background: var(--card-bg);
+      border: 1px solid var(--widget-border);
+      border-radius: 9999px;
+      padding: 3px;
     }
+
     .lang-btn {
       background: transparent;
       border: none;
-      color: var(--text-muted);
-      padding: 0.3rem 0.65rem;
+      color: var(--text-dim);
+      padding: 0.3rem 0.75rem;
+      border-radius: 9999px;
       font-size: 0.75rem;
+      font-family: var(--mono-font);
       font-weight: 700;
-      border-radius: 0.35rem;
       cursor: pointer;
       transition: all 0.2s ease;
     }
+
     .lang-btn.active {
-      background: var(--accent);
-      color: #000;
-      box-shadow: 0 2px 8px rgba(0, 210, 255, 0.3);
+      background: #ffffff;
+      color: #000000;
     }
+
+    /* Main Bento Card */
     .card {
+      width: 100%;
+      max-width: 100%;
+      box-sizing: border-box;
       background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 1.25rem;
-      padding: 1.75rem 1.5rem;
-      box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.9), 0 0 30px rgba(0, 210, 255, 0.04);
+      border: 1px solid var(--widget-border);
+      border-radius: 24px;
+      padding: 1.65rem 1.25rem;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.7);
       position: relative;
+      overflow: hidden;
     }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 15%;
+      right: 15%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+    }
+
     .title-area {
       text-align: center;
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.4rem;
     }
-    .logo-glow {
-      display: inline-flex;
+
+    /* Eye-Catching Qorvhex Channel Bento Banner */
+    .channel-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      background: linear-gradient(135deg, rgba(215, 25, 33, 0.15) 0%, #141414 70%);
+      border: 1px solid rgba(215, 25, 33, 0.4);
+      border-radius: 18px;
+      padding: 0.85rem 1rem;
+      margin-bottom: 1.25rem;
+      text-decoration: none;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.6), 0 0 16px rgba(215, 25, 33, 0.15);
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      width: 100%;
+      box-sizing: border-box;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .channel-banner::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+    }
+
+    .channel-banner:hover {
+      border-color: var(--accent-red);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 25px rgba(215, 25, 33, 0.3);
+      background: linear-gradient(135deg, rgba(215, 25, 33, 0.22) 0%, #181818 70%);
+    }
+
+    .channel-banner-left {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .telegram-icon-box {
+      width: 40px;
+      height: 40px;
+      background: var(--accent-red);
+      color: #ffffff;
+      border-radius: 12px;
+      display: flex;
       align-items: center;
       justify-content: center;
-      width: 52px;
-      height: 52px;
-      border-radius: 1rem;
-      background: rgba(34, 158, 217, 0.12);
-      border: 1px solid rgba(34, 158, 217, 0.3);
-      color: var(--tg-blue);
-      margin-bottom: 0.75rem;
-      box-shadow: 0 0 20px rgba(34, 158, 217, 0.2);
+      flex-shrink: 0;
+      box-shadow: 0 0 12px var(--accent-red-glow);
     }
-    h1 {
-      font-size: 1.5rem;
+
+    .channel-banner-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+      text-align: right;
+    }
+
+    [dir="ltr"] .channel-banner-info {
+      text-align: left;
+    }
+
+    .channel-banner-title {
+      font-size: 0.925rem;
       font-weight: 800;
-      letter-spacing: -0.02em;
-      margin-bottom: 0.35rem;
-      background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
+      font-family: var(--mono-font);
+      color: #ffffff;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    p.desc {
+
+    .channel-banner-sub {
+      font-size: 0.72rem;
       color: var(--text-muted);
-      font-size: 0.875rem;
-      line-height: 1.5;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
+
+    [dir="rtl"] .channel-banner-sub {
+      font-family: 'Vazirmatn', -apple-system, sans-serif !important;
+      letter-spacing: normal !important;
+    }
+
+    .channel-banner-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: #ffffff;
+      color: #000000;
+      font-weight: 800;
+      font-size: 0.75rem;
+      padding: 0.4rem 0.85rem;
+      border-radius: 9999px;
+      flex-shrink: 0;
+      transition: all 0.2s;
+    }
+
+    .channel-banner:hover .channel-banner-action {
+      background: #f0f0f0;
+      box-shadow: 0 0 10px rgba(255, 255, 255, 0.4);
+    }
+
+    .brand-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-family: var(--mono-font);
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-red);
+      margin-bottom: 0.45rem;
+      font-weight: 700;
+      text-decoration: none;
+      direction: ltr;
+      padding: 0.2rem 0.6rem;
+      background: rgba(215, 25, 33, 0.08);
+      border: 1px solid rgba(215, 25, 33, 0.22);
+      border-radius: 9999px;
+      transition: all 0.2s ease;
+    }
+
+    .brand-tag:hover {
+      background: rgba(215, 25, 33, 0.16);
+      border-color: var(--accent-red);
+      transform: translateY(-1px);
+    }
+
+    .brand-tag svg {
+      flex-shrink: 0;
+    }
+
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 900;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      margin-bottom: 0.4rem;
+    }
+
+    .desc {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      line-height: 1.45;
+    }
+
+    /* Nothing OS Primary Action Pill */
     .main-connect-btn {
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 0.65rem;
-      background: var(--tg-grad);
-      color: #fff;
+      gap: 0.6rem;
+      width: 100%;
+      height: 52px;
+      background: #ffffff;
+      color: #000000;
+      border-radius: 9999px;
       text-decoration: none;
       font-weight: 700;
-      font-size: 1.05rem;
-      padding: 0.95rem 1.5rem;
-      border-radius: 0.85rem;
-      box-shadow: 0 8px 24px -4px rgba(34, 158, 217, 0.45);
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-      margin-bottom: 1.5rem;
-      border: 1px solid rgba(255, 255, 255, 0.15);
+      font-size: 0.925rem;
+      font-family: var(--main-font);
+      margin-bottom: 1.15rem;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      border: 1px solid #ffffff;
+      box-sizing: border-box;
     }
+
     .main-connect-btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 12px 30px -4px rgba(34, 158, 217, 0.6);
-      filter: brightness(1.08);
+      background: #e6e6e6;
+      transform: translateY(-1px);
+      box-shadow: 0 8px 24px rgba(255, 255, 255, 0.15);
     }
+
     .main-connect-btn:active {
       transform: translateY(0);
     }
+
+    /* Bento Link Boxes */
     .link-box {
-      background: var(--code-bg);
-      border: 1px solid var(--border);
-      border-radius: 0.75rem;
-      padding: 0.75rem 0.85rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 0.65rem;
-      margin-bottom: 0.85rem;
+      gap: 0.5rem;
+      background: var(--widget-bg);
+      border: 1px solid var(--widget-border);
+      border-radius: 14px;
+      padding: 0.65rem 0.85rem;
+      margin-bottom: 0.65rem;
+      width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
       transition: border-color 0.2s;
     }
+
     .link-box:hover {
-      border-color: var(--border-focus);
+      border-color: var(--widget-hover);
     }
+
     .link-box code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 0.8rem;
-      color: var(--accent);
-      white-space: nowrap;
-      overflow-x: auto;
-      direction: ltr;
-      text-align: left;
-    }
-    .btn-copy {
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      color: var(--text);
-      padding: 0.45rem 0.85rem;
-      border-radius: 0.5rem;
-      font-size: 0.775rem;
-      font-weight: 600;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: all 0.2s;
-      flex-shrink: 0;
-    }
-    .btn-copy:hover {
-      background: rgba(255, 255, 255, 0.16);
-      color: var(--accent);
-    }
-    .btn-copy.copied {
-      background: rgba(16, 185, 129, 0.2);
-      border-color: var(--success);
-      color: var(--success);
-    }
-    .qr-section {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 1.25rem 0 0.5rem 0;
-      border-top: 1px solid var(--border);
-      margin-top: 1rem;
-    }
-    .qr-wrapper {
-      background: #000000;
-      border: 1px solid rgba(0, 210, 255, 0.3);
-      padding: 10px;
-      border-radius: 0.85rem;
-      box-shadow: 0 0 20px rgba(0, 210, 255, 0.15);
-      margin-bottom: 0.75rem;
-      display: inline-block;
-    }
-    #qr-canvas {
-      display: block;
-      border-radius: 0.5rem;
-    }
-    .qr-caption {
-      font-size: 0.775rem;
-      color: var(--text-dim);
-    }
-    .details-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 0.65rem;
-      margin-top: 1.25rem;
-      border-top: 1px solid var(--border);
-      padding-top: 1.25rem;
-    }
-    .detail-item {
-      background: rgba(255, 255, 255, 0.02);
-      border: 1px solid var(--border);
-      border-radius: 0.65rem;
-      padding: 0.65rem 0.85rem;
-    }
-    .detail-label {
-      font-size: 0.725rem;
-      color: var(--text-dim);
-      margin-bottom: 0.25rem;
-    }
-    .detail-val {
-      font-size: 0.825rem;
-      font-weight: 600;
+      font-family: var(--mono-font);
+      font-size: 0.75rem;
       color: var(--text-muted);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       direction: ltr;
       text-align: left;
+      flex: 1 1 0%;
+      min-width: 0;
     }
-    .guide-box {
-      margin-top: 1.25rem;
-      background: rgba(0, 210, 255, 0.03);
-      border: 1px solid rgba(0, 210, 255, 0.1);
-      border-radius: 0.75rem;
-      padding: 0.85rem 1rem;
+
+    .btn-copy {
+      background: transparent;
+      border: 1px solid #333333;
+      color: var(--text);
+      border-radius: 9999px;
+      padding: 0.35rem 0.8rem;
+      font-size: 0.72rem;
+      font-family: var(--mono-font);
+      font-weight: 600;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 0.2s;
+      min-width: 68px;
+      text-align: center;
+    }
+
+    .btn-copy:hover {
+      border-color: #666666;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .btn-copy.copied {
+      background: var(--accent-red);
+      border-color: var(--accent-red);
+      color: #ffffff;
+    }
+
+    /* QR Code Widget */
+    .qr-section {
+      text-align: center;
+      margin: 1.15rem 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+    }
+
+    .qr-wrapper {
+      background: #000000;
+      padding: 12px;
+      border: 1px solid var(--widget-border);
+      border-radius: 18px;
+      display: inline-block;
+      box-shadow: inset 0 0 15px rgba(255, 255, 255, 0.02);
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+
+    #qr-canvas {
+      display: block;
+      border-radius: 6px;
+      max-width: 100%;
+      height: auto;
+    }
+
+    .qr-caption {
+      font-size: 0.725rem;
+      color: var(--text-dim);
+      font-family: var(--mono-font);
+      margin-top: 0.55rem;
+    }
+
+    /* Bento Spec Grid - 100% Responsive with min-width: 0 */
+    .details-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.65rem;
+      margin-top: 1.15rem;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    .detail-item {
+      background: var(--widget-bg);
+      border: 1px solid var(--widget-border);
+      border-radius: 14px;
+      padding: 0.75rem 0.85rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-width: 0;
+      overflow: hidden;
+      box-sizing: border-box;
+      transition: border-color 0.2s;
+    }
+
+    .detail-item:hover {
+      border-color: var(--widget-hover);
+    }
+
+    /* Long domain and protocol span full card width for perfect responsiveness */
+    .detail-item.span-2 {
+      grid-column: span 2;
+    }
+
+    .detail-label {
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      font-family: var(--mono-font);
+      text-transform: uppercase;
+      margin-bottom: 0.25rem;
+    }
+
+    .detail-val {
       font-size: 0.8rem;
+      font-weight: 700;
+      font-family: var(--mono-font);
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      direction: ltr;
+      text-align: left;
+      min-width: 0;
+      width: 100%;
+    }
+
+    .proto-link {
+      color: var(--text);
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: color 0.2s;
+      max-width: 100%;
+      min-width: 0;
+    }
+
+    .proto-link span {
+      border-bottom: 1px dotted var(--text-dim);
+      transition: border-color 0.2s;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .proto-link:hover {
+      color: #ffffff;
+    }
+
+    .proto-link:hover span {
+      border-bottom-color: var(--accent-red);
+      color: var(--accent-red);
+    }
+
+    /* Guide Box */
+    .guide-box {
+      margin-top: 1.15rem;
+      background: var(--widget-bg);
+      border: 1px solid var(--widget-border);
+      border-radius: 16px;
+      padding: 0.9rem 1rem;
+      font-size: 0.78rem;
       line-height: 1.6;
       color: var(--text-muted);
+      width: 100%;
+      box-sizing: border-box;
     }
+
+    .guide-header {
+      font-weight: 700;
+      font-size: 0.8rem;
+      color: var(--text);
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
     .guide-box ol {
-      margin-right: 1.25rem;
-      margin-left: 0;
+      list-style: none;
+      counter-reset: guide-counter;
     }
-    [dir="ltr"] .guide-box ol {
-      margin-left: 1.25rem;
-      margin-right: 0;
+
+    .guide-box li {
+      counter-increment: guide-counter;
+      position: relative;
+      padding-right: 1.6rem;
+      margin-bottom: 0.4rem;
     }
+
+    [dir="ltr"] .guide-box li {
+      padding-right: 0;
+      padding-left: 1.6rem;
+    }
+
+    .guide-box li::before {
+      content: counter(guide-counter, decimal-leading-zero);
+      position: absolute;
+      right: 0;
+      top: 0;
+      font-family: var(--mono-font);
+      font-size: 0.68rem;
+      font-weight: 700;
+      color: var(--accent-red);
+    }
+
+    [dir="ltr"] .guide-box li::before {
+      right: auto;
+      left: 0;
+    }
+
+    .guide-box li:last-child {
+      margin-bottom: 0;
+    }
+
     footer {
       text-align: center;
-      margin-top: 1.5rem;
-      font-size: 0.75rem;
+      margin-top: 1.4rem;
+      font-size: 0.72rem;
+      font-family: var(--mono-font);
       color: var(--text-dim);
+      letter-spacing: 0.04em;
     }
-    footer a { color: var(--accent); text-decoration: none; }
+
+    footer a {
+      color: var(--text-muted);
+      text-decoration: none;
+      border-bottom: 1px dotted var(--text-dim);
+      transition: all 0.2s;
+    }
+
+    footer a:hover {
+      color: #ffffff;
+      border-bottom-color: #ffffff;
+    }
+
+    @media (max-width: 440px) {
+      body {
+        padding: 0.85rem 0.6rem;
+      }
+      .card {
+        padding: 1.25rem 0.85rem;
+        border-radius: 20px;
+      }
+      .details-grid {
+        grid-template-columns: 1fr;
+      }
+      .detail-item.span-2 {
+        grid-column: span 1;
+      }
+      .qr-wrapper {
+        padding: 8px;
+      }
+      #qr-canvas {
+        width: 170px !important;
+        height: 170px !important;
+      }
+    }
   </style>
 </head>
 <body>
@@ -1273,22 +1795,36 @@ function renderTwpDashboard(hostname, secretHex) {
     <div class="header-bar">
       <div class="status-badge">
         <span class="pulse-dot"></span>
-        <span id="txt-status">آماده اتصال • آنلاین</span>
+        <span id="txt-status">آنلاین • آماده اتصال</span>
       </div>
       <div class="lang-toggle">
-        <button id="btn-fa" class="lang-btn active" onclick="setLang('fa')">فارسی</button>
-        <button id="btn-en" class="lang-btn" onclick="setLang('en')">English</button>
+        <button id="btn-fa" class="lang-btn active" onclick="setLang('fa')">FA</button>
+        <button id="btn-en" class="lang-btn" onclick="setLang('en')">EN</button>
       </div>
     </div>
 
     <div class="card">
-      <div class="title-area">
-        <div class="logo-glow">
-          <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
-          </svg>
+      <!-- Eye-Catching Qorvhex Channel Banner -->
+      <a href="https://t.me/Qorvhex_Channel" target="_blank" rel="noopener noreferrer" class="channel-banner">
+        <div class="channel-banner-left">
+          <div class="telegram-icon-box">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
+            </svg>
+          </div>
+          <div class="channel-banner-info">
+            <span class="channel-banner-title">QORVHEX CHANNEL</span>
+            <span class="channel-banner-sub" id="txt-channel-sub">کانال رسمی تلگرام • اخبار، آپدیت‌ها و پروکسی</span>
+          </div>
         </div>
-        <h1 id="txt-title">⚡ وب‌پروکسی رسمی تلگرام (TWP v2.0)</h1>
+        <div class="channel-banner-action">
+          <span id="txt-channel-join">عضویت</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </div>
+      </a>
+
+      <div class="title-area">
+        <h1 id="txt-title">⚡ وب‌پروکسی تلگرام (TWP Core v2.2)</h1>
         <p class="desc" id="txt-desc">سرورلس روی لبه کلادفلر با فناوری رمزنگاری مستقیم و دانلود صفر-کپی</p>
       </div>
 
@@ -1309,7 +1845,7 @@ function renderTwpDashboard(hostname, secretHex) {
       <div class="link-box">
         <code>${webLink}</code>
         <button class="btn-copy" onclick="copyText('${webLink}', this)">
-          <span class="btn-lbl" id="txt-copy-web">لینک اشتراک</span>
+          <span class="btn-lbl" id="txt-copy-web">اشتراک</span>
         </button>
       </div>
 
@@ -1321,26 +1857,31 @@ function renderTwpDashboard(hostname, secretHex) {
       </div>
 
       <div class="details-grid">
-        <div class="detail-item">
+        <div class="detail-item span-2">
           <div class="detail-label" id="lbl-server">سرور / دامنه</div>
           <div class="detail-val">${hostname}</div>
         </div>
         <div class="detail-item">
           <div class="detail-label" id="lbl-port">پورت اتصال</div>
-          <div class="detail-val">443 (TLS 1.3 / WSS)</div>
-        </div>
-        <div class="detail-item">
-          <div class="detail-label" id="lbl-proto">نوع پروتکل</div>
-          <div class="detail-val">Telegram WEB Proxy v1</div>
+          <div class="detail-val">443 // TLS 1.3 // WSS</div>
         </div>
         <div class="detail-item">
           <div class="detail-label" id="lbl-enc">رمزنگاری داده</div>
           <div class="detail-val">Obfuscated2 (Zero-Copy)</div>
         </div>
+        <div class="detail-item span-2">
+          <div class="detail-label" id="lbl-proto">نوع پروتکل</div>
+          <div class="detail-val">
+            <a href="https://github.com/telegramdesktop/tproxy-server" target="_blank" rel="noopener noreferrer" class="proto-link">
+              <span>Telegram WEB Proxy v1</span>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+            </a>
+          </div>
+        </div>
       </div>
 
       <div class="guide-box">
-        <div style="font-weight:700; color:var(--text); margin-bottom:0.4rem;" id="txt-guide-title">💡 راهنمای اتصال سریع:</div>
+        <div class="guide-header" id="txt-guide-title">راهنمای اتصال سریع:</div>
         <ol>
           <li id="txt-g1">روی دکمه «اتصال مستقیم به تلگرام» کلیک کنید تا پروکسی در اپلیکیشن باز شود.</li>
           <li id="txt-g2">در پنجره باز شده تلگرام، دکمه «Connect Proxy» را بزنید.</li>
@@ -1350,113 +1891,144 @@ function renderTwpDashboard(hostname, secretHex) {
     </div>
 
     <footer>
-      TWP Core v2.0 • Powered by Cloudflare Workers • <a href="https://github.com/Qorvhex/TWP" target="_blank">GitHub</a>
+      TWP Core v2.2 • Powered by Cloudflare Workers • <a href="https://github.com/Qorvhex/TWP" target="_blank">GitHub</a>
     </footer>
   </div>
 
   <script>${qriousCode}</script>
   <script>
-    // QR Code rendering
+    // QR Code rendering with high-contrast monochrome Nothing OS theme
     try {
       new QRious({
         element: document.getElementById('qr-canvas'),
         value: '${deepLink}',
         size: 200,
-        background: '#070a10',
-        foreground: '#00d2ff',
+        background: '#000000',
+        foreground: '#ffffff',
         level: 'M'
       });
     } catch(e) {}
 
-    // Clipboard copy
+    // Clipboard copy with robust fallback
     function copyText(str, btn) {
-      navigator.clipboard.writeText(str).then(function() {
+      function markCopied() {
         const lbl = btn.querySelector('.btn-lbl');
-        const orig = lbl.innerText;
+        const orig = lbl.getAttribute('data-orig') || lbl.innerText;
+        lbl.setAttribute('data-orig', orig);
         btn.classList.add('copied');
-        lbl.innerText = currentLang === 'fa' ? 'کپی شد!' : 'Copied!';
+        lbl.innerText = currentLang === 'fa' ? 'کپی شد!' : 'COPIED!';
         setTimeout(function() {
           btn.classList.remove('copied');
-          lbl.innerText = orig;
+          lbl.innerText = lbl.getAttribute('data-orig') || orig;
         }, 2000);
-      });
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(str).then(markCopied, function() {
+          const ta = document.createElement('textarea');
+          ta.value = str;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand('copy'); } catch (e) {}
+          document.body.removeChild(ta);
+          markCopied();
+        });
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = str;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+        markCopied();
+      }
     }
 
     // Bilingual i18n
     const i18n = {
       fa: {
-        dir: 'rtl',
-        status: 'آماده اتصال • آنلاین',
-        title: '⚡ وب‌پروکسی رسمی تلگرام (TWP v2.0)',
+        status: 'آنلاین • آماده اتصال',
+        title: '⚡ وب‌پروکسی تلگرام (TWP Core v2.2)',
         desc: 'سرورلس روی لبه کلادفلر با فناوری رمزنگاری مستقیم و دانلود صفر-کپی',
+        channelSub: 'کانال رسمی تلگرام • اخبار، آپدیت‌ها و پروکسی',
+        channelJoin: 'عضویت',
         connectBtn: 'اتصال مستقیم به تلگرام',
         copyDeep: 'کپی لینک',
-        copyWeb: 'لینک اشتراک',
+        copyWeb: 'اشتراک',
         qrCaption: 'اسکن با دوربین گوشی جهت اتصال سریع',
         server: 'سرور / دامنه',
         port: 'پورت اتصال',
         proto: 'نوع پروتکل',
         enc: 'رمزنگاری داده',
-        guideTitle: '💡 راهنمای اتصال سریع:',
+        guideTitle: 'راهنمای اتصال سریع:',
         g1: 'روی دکمه «اتصال مستقیم به تلگرام» کلیک کنید تا پروکسی در اپلیکیشن باز شود.',
         g2: 'در پنجره باز شده تلگرام، دکمه «Connect Proxy» را بزنید.',
         g3: 'این پروتکل نیاز به هیچ اپلیکیشن جانبی یا فیلترشکن ندارد و مستقیم به شبکه لبه متصل می‌شود.'
       },
       en: {
-        dir: 'ltr',
-        status: 'Online • Edge Ready',
-        title: '⚡ Telegram WEB Proxy (TWP v2.0)',
-        desc: '100% Serverless on Cloudflare Edge with In-Worker Obfuscated2 Engine',
-        connectBtn: 'Connect in Telegram',
+        status: 'ONLINE // READY',
+        title: '⚡ Telegram WEB Proxy (TWP Core v2.2)',
+        desc: 'High-performance serverless relay on Cloudflare Workers with zero-copy downlink',
+        channelSub: 'Official Telegram Channel • Updates & Proxies',
+        channelJoin: 'JOIN',
+        connectBtn: 'Direct Connect to Telegram',
         copyDeep: 'Copy Link',
         copyWeb: 'Share Link',
-        qrCaption: 'Scan with phone camera to connect',
-        server: 'Server / Host',
+        qrCaption: 'Scan with camera to connect instantly',
+        server: 'Server / Hostname',
         port: 'Port',
         proto: 'Protocol',
         enc: 'Encryption',
-        guideTitle: '💡 Quick Connection Guide:',
-        g1: 'Click "Connect in Telegram" to open the proxy directly in the app.',
-        g2: 'In Telegram confirmation dialog, tap "Connect Proxy".',
-        g3: 'No VPN or third-party client required; routes securely via Cloudflare Anycast.'
+        guideTitle: 'Quick Setup Guide:',
+        g1: 'Tap "Direct Connect to Telegram" to open the proxy in your client.',
+        g2: 'In the Telegram modal prompt, tap "Connect Proxy".',
+        g3: 'No third-party apps required; runs purely over serverless Anycast edge.'
       }
     };
 
     let currentLang = 'fa';
+
     function setLang(lang) {
+      if (!i18n[lang]) return;
       currentLang = lang;
-      const t = i18n[lang];
-      document.documentElement.dir = t.dir;
-      document.documentElement.lang = lang;
+      const htmlEl = document.documentElement;
+      htmlEl.setAttribute('lang', lang);
+      htmlEl.setAttribute('dir', lang === 'fa' ? 'rtl' : 'ltr');
 
       document.getElementById('btn-fa').classList.toggle('active', lang === 'fa');
       document.getElementById('btn-en').classList.toggle('active', lang === 'en');
 
+      const t = i18n[lang];
       document.getElementById('txt-status').innerText = t.status;
       document.getElementById('txt-title').innerText = t.title;
       document.getElementById('txt-desc').innerText = t.desc;
+      if (document.getElementById('txt-channel-sub')) document.getElementById('txt-channel-sub').innerText = t.channelSub;
+      if (document.getElementById('txt-channel-join')) document.getElementById('txt-channel-join').innerText = t.channelJoin;
       document.getElementById('txt-connect-btn').innerText = t.connectBtn;
       document.getElementById('txt-copy-deep').innerText = t.copyDeep;
       document.getElementById('txt-copy-web').innerText = t.copyWeb;
       document.getElementById('txt-qr-caption').innerText = t.qrCaption;
-
       document.getElementById('lbl-server').innerText = t.server;
       document.getElementById('lbl-port').innerText = t.port;
       document.getElementById('lbl-proto').innerText = t.proto;
       document.getElementById('lbl-enc').innerText = t.enc;
-
       document.getElementById('txt-guide-title').innerText = t.guideTitle;
       document.getElementById('txt-g1').innerText = t.g1;
       document.getElementById('txt-g2').innerText = t.g2;
       document.getElementById('txt-g3').innerText = t.g3;
 
-      localStorage.setItem('twp_lang', lang);
+      try { localStorage.setItem('twp_lang', lang); } catch(e) {}
     }
 
-    const saved = localStorage.getItem('twp_lang');
-    if (saved && (saved === 'fa' || saved === 'en')) {
-      setLang(saved);
-    }
+    try {
+      const saved = localStorage.getItem('twp_lang');
+      if (saved && (saved === 'fa' || saved === 'en')) {
+        setLang(saved);
+      }
+    } catch(e) {}
   </script>
 </body>
 </html>`;
@@ -1465,7 +2037,7 @@ function renderTwpDashboard(hostname, secretHex) {
     status: 200,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'no-store, max-age=0',
+      'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
     },
   });
@@ -1479,11 +2051,27 @@ function renderNotFound() {
   });
 }
 
+async function serveCamouflage(request, camouflageUrl) {
+  try {
+    const cleanHeaders = new Headers();
+    const copyKeys = ['accept', 'accept-language', 'user-agent', 'cache-control', 'if-none-match', 'if-modified-since'];
+    for (const k of copyKeys) {
+      const val = request.headers.get(k);
+      if (val) cleanHeaders.set(k, val);
+    }
+    return await fetch(camouflageUrl, {
+      method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+      headers: cleanHeaders,
+      redirect: 'follow',
+    });
+  } catch {
+    return renderNotFound();
+  }
+}
+
 // ==================================================================================
 // 8. HTTP REQUEST ROUTER & EXPORT
 // ==================================================================================
-
-const HELLO_FRAME_BYTES = Uint8Array.of(FRAME_HELLO, 0, 0, 0, 0, 0, 0, 1, 1);
 
 async function handleHttpRequest(request, env) {
   const config = await resolveConfig(env);
@@ -1494,11 +2082,17 @@ async function handleHttpRequest(request, env) {
 
   // Route 1: Bridge Initializer
   if (url.pathname === '/' && request.method === 'GET' && /^\?bridge=[A-Za-z0-9_-]{43}$/.test(url.search)) {
-    const expectedCapability = toBase64Url(
-      await computeHmac(config.capabilityKey, textEncoder.encode(BRIDGE_DOMAIN_LABEL + hostname))
-    );
     const providedCapability = url.search.slice(8);
-    if (!timingSafeEquals(textEncoder.encode(providedCapability), textEncoder.encode(expectedCapability))) {
+    const providedBytes = textEncoder.encode(providedCapability);
+    const contextBytes = textEncoder.encode(BRIDGE_DOMAIN_LABEL + hostname);
+
+    const expectedFull = toBase64Url(await computeHmac(config.capabilityKey, contextBytes));
+    let isValid = timingSafeEquals(providedBytes, textEncoder.encode(expectedFull));
+    if (!isValid && config.isPadded) {
+      const expected16 = toBase64Url(await computeHmac(config.capabilityKey16, contextBytes));
+      isValid = timingSafeEquals(providedBytes, textEncoder.encode(expected16));
+    }
+    if (!isValid) {
       return renderNotFound();
     }
     const bootstrapToken = await issueStatelessToken(config, 1);
@@ -1509,7 +2103,7 @@ async function handleHttpRequest(request, env) {
   if (url.pathname === '/' && request.method === 'GET' && !url.search) {
     const camouflageUrl = typeof env?.CAMOUFLAGE_URL === 'string' ? env.CAMOUFLAGE_URL.trim() : '';
     if (camouflageUrl) {
-      return fetch(camouflageUrl, { headers: request.headers });
+      return serveCamouflage(request, camouflageUrl);
     }
     const secretHex = toHex(config.fullBytes);
     return renderTwpDashboard(hostname, secretHex);
@@ -1529,7 +2123,7 @@ async function handleHttpRequest(request, env) {
       const requestBody = new Uint8Array(await request.arrayBuffer());
       if (!timingSafeEquals(requestBody, HELLO_FRAME_BYTES)) return renderNotFound();
 
-      return new Response(packFrame(FRAME_WELCOME, 0), {
+      return new Response(WELCOME_FRAME_BYTES, {
         status: 200,
         headers: {
           'Content-Type': 'application/octet-stream',
@@ -1576,7 +2170,7 @@ async function handleHttpRequest(request, env) {
 
     const pair = new WebSocketPair();
     const [clientSocket, serverSocket] = Object.values(pair);
-    serverSocket.binaryType = 'arraybuffer';
+    try { serverSocket.binaryType = 'arraybuffer'; } catch {}
     serverSocket.accept();
 
     handleCarrierSession(serverSocket, config, {
@@ -1592,6 +2186,45 @@ async function handleHttpRequest(request, env) {
   }
 
   return renderNotFound();
+}
+
+export function getTwpInternals() {
+  return {
+    TELEGRAM_DCS,
+    HELLO_FRAME_BYTES,
+    WELCOME_FRAME_BYTES,
+    FRAME_OPEN,
+    FRAME_DATA,
+    FRAME_CLOSE,
+    FRAME_WINDOW,
+    FRAME_PING,
+    FRAME_PONG,
+    FRAME_HELLO,
+    FRAME_WELCOME,
+    FRAME_BYE,
+    toHex,
+    parseHex,
+    toBase64Url,
+    fromBase64Url,
+    concatArrays,
+    reverseBytes,
+    incrementCounter128,
+    packFrame,
+    packFrameBatch,
+    unpackFrameBatch,
+    validateClientFrame,
+    createAesCtrCipher,
+    applyAesCtr,
+    resolveConfig,
+    issueStatelessToken,
+    verifyStatelessToken,
+    normalizeDcId,
+    parseClientHandshake,
+    generateDcHandshake,
+    connectToDatacenter,
+    safeCloseSocket,
+    handleHttpRequest,
+  };
 }
 
 export default {
