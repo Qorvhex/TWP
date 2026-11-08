@@ -1,5 +1,7 @@
 <div align="center">
 
+<img width="2752" height="1536" alt="Gemini_Generated_Image_nm6rwanm6rwanm6r" src="https://github.com/user-attachments/assets/f19c1be0-faf2-4025-9454-7f65c8e40733" />
+
 # ⚡ TWP (Telegram Worker Proxy) Core v2.2
 
 **Official Telegram WEB Proxy Engine for Cloudflare Workers (Zero VPS Required)**  
