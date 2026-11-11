@@ -25,6 +25,8 @@ const {
   createAesCtrCipher,
   applyAesCtr,
   resolveConfig,
+  resolveAdminPath,
+  isDefaultSecret,
   issueStatelessToken,
   verifyStatelessToken,
   normalizeDcId,
@@ -149,8 +151,11 @@ test('HTTP router serves original dashboard and session handshake', async () => 
   const dashRes = await handleHttpRequest(new Request('https://proxy.example.com/'), env);
   assert.equal(dashRes.status, 200);
   const dashHtml = await dashRes.text();
-  assert.ok(dashHtml.includes('TWP Core v2.2'));
+  assert.ok(dashHtml.includes('TWP Core v2.3'));
   assert.ok(dashHtml.includes('https://github.com/telegramdesktop/tproxy-server'));
+  assert.ok(dashHtml.includes('class="security-banner"'));
+  assert.ok(dashHtml.includes('id="security-modal"'));
+  assert.ok(dashHtml.includes('https://t.me/qorvhexdeployer_bot'));
 
   const bootTok = await issueStatelessToken(cfg, 1);
   const sessRes = await handleHttpRequest(
@@ -167,6 +172,85 @@ test('HTTP router serves original dashboard and session handshake', async () => 
   assert.equal(sessRes.status, 200);
   const welcomeBytes = new Uint8Array(await sessRes.arrayBuffer());
   assert.deepEqual(welcomeBytes, WELCOME_FRAME_BYTES);
+});
+
+test('Security warning adapts cleanly across ADMIN and SECRET configuration states', async () => {
+  const customSecret = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+
+  // Case 1: Both ADMIN unset and SECRET default
+  const resBoth = await handleHttpRequest(new Request('https://proxy.example.com/'), {});
+  assert.equal(resBoth.status, 200);
+  const htmlBoth = await resBoth.text();
+  assert.ok(htmlBoth.includes('{"adminMissing":true,"secretDefault":true}'));
+  assert.ok(htmlBoth.includes('id="sec-risk-admin"'));
+  assert.ok(htmlBoth.includes('id="sec-risk-secret"'));
+
+  // Case 2: ADMIN unset, SECRET customized (even if PROXY_SECRET is empty string)
+  const envOnlyAdminMissing = { PROXY_SECRET: '', SECRET: customSecret };
+  const cfgCustom = await resolveConfig(envOnlyAdminMissing);
+  assert.equal(isDefaultSecret(envOnlyAdminMissing, cfgCustom), false);
+  const resAdminMissing = await handleHttpRequest(new Request('https://proxy.example.com/'), envOnlyAdminMissing);
+  assert.equal(resAdminMissing.status, 200);
+  const htmlAdminMissing = await resAdminMissing.text();
+  assert.ok(htmlAdminMissing.includes('{"adminMissing":true,"secretDefault":false}'));
+  assert.ok(htmlAdminMissing.includes('id="sec-risk-admin"'));
+  assert.ok(!htmlAdminMissing.includes('id="sec-risk-secret"'));
+
+  // Case 3: ADMIN set, SECRET still default -> / is stealth site, /<ADMIN> warns about SECRET only
+  const envOnlySecretDefault = { ADMIN: '  /secret-gate/  ' };
+  assert.equal(resolveAdminPath(envOnlySecretDefault), 'secret-gate');
+  const rootCamoRes = await handleHttpRequest(new Request('https://proxy.example.com/'), envOnlySecretDefault);
+  assert.equal(rootCamoRes.status, 200);
+  const camoHtml = await rootCamoRes.text();
+  assert.ok(camoHtml.includes('Alder &amp; Grid'));
+  assert.ok(!/telegram|webproxy|twp|qorvhex|mtproto/i.test(camoHtml));
+
+  const adminWarnRes = await handleHttpRequest(new Request('https://proxy.example.com/secret-gate'), envOnlySecretDefault);
+  assert.equal(adminWarnRes.status, 200);
+  assert.equal(adminWarnRes.headers.get('X-Robots-Tag'), 'noindex, nofollow');
+  const htmlSecretDefault = await adminWarnRes.text();
+  assert.ok(htmlSecretDefault.includes('{"adminMissing":false,"secretDefault":true}'));
+  assert.ok(!htmlSecretDefault.includes('id="sec-risk-admin"'));
+  assert.ok(htmlSecretDefault.includes('id="sec-risk-secret"'));
+
+  // Case 4: Both ADMIN and SECRET configured -> clean dashboard without warning card
+  const envHardened = { ADMIN: 'My-Secret-Panel', SECRET: customSecret, CAMOUFLAGE_URL: 'https://blocked.invalid' };
+  const headCamoRes = await handleHttpRequest(new Request('https://proxy.example.com/', { method: 'HEAD' }), envHardened);
+  assert.equal(headCamoRes.status, 200);
+  assert.equal(await headCamoRes.text(), '');
+
+  const robotsRes = await handleHttpRequest(new Request('https://proxy.example.com/robots.txt'), envHardened);
+  assert.equal(robotsRes.status, 200);
+  assert.ok((await robotsRes.text()).includes('User-agent: *'));
+
+  const wrongCaseRes = await handleHttpRequest(new Request('https://proxy.example.com/my-secret-panel'), envHardened);
+  assert.equal(wrongCaseRes.status, 404);
+
+  const cleanAdminRes = await handleHttpRequest(new Request('https://proxy.example.com/My-Secret-Panel/'), envHardened);
+  assert.equal(cleanAdminRes.status, 200);
+  const cleanAdminHtml = await cleanAdminRes.text();
+  assert.ok(cleanAdminHtml.includes('TWP Core v2.3'));
+  assert.ok(!cleanAdminHtml.includes('class="security-banner"'));
+  assert.ok(!cleanAdminHtml.includes('id="security-modal"'));
+});
+
+test('Bridge initializer and malformed bridge rejection continue working with ADMIN active', async () => {
+  const customSecret = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+  const env = { ADMIN: 'gate99', SECRET: customSecret };
+  const cfg = await resolveConfig(env);
+  const hostname = 'proxy.example.com';
+
+  const contextBytes = new TextEncoder().encode(`tdesktop-web-proxy-bridge-v1\n${hostname}`);
+  const capMac = new Uint8Array(await crypto.subtle.sign('HMAC', cfg.capabilityKey, contextBytes));
+  const cap = toBase64Url(capMac);
+
+  const bridgeRes = await handleHttpRequest(new Request(`https://${hostname}/?bridge=${cap}`), env);
+  assert.equal(bridgeRes.status, 200);
+  const bridgeHtml = await bridgeRes.text();
+  assert.ok(bridgeHtml.includes('tproxy-android-init'));
+
+  const badBridgeRes = await handleHttpRequest(new Request(`https://${hostname}/?bridge=invalid`), env);
+  assert.equal(badBridgeRes.status, 404);
 });
 
 test('connectToDatacenter sequential failover connects to datacenter endpoints and handles errors', async () => {

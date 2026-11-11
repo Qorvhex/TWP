@@ -60,12 +60,12 @@ URL = https://<hostname>/?bridge=<capability>#android=<webview-nonce>
 ```
 
 ### Derivation:
-- **Root Deployment:**
+- **Root Deployment (used by `worker.js`):**
   ```text
   context = UTF-8("tdesktop-web-proxy-bridge-v1\n" + hostname)
   bridge  = base64url-no-padding(HMAC-SHA256(key=secretBytes, message=context))
   ```
-- **Base Path Deployment (`BASE_PATH = slug`):**
+- **Base Path Deployment (optional spec extension `v2`):**
   ```text
   context = UTF-8("tdesktop-web-proxy-bridge-v2\n" + hostname + "\n" + slug)
   bridge  = base64url-no-padding(HMAC-SHA256(key=secretBytes, message=context))

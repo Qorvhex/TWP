@@ -1,12 +1,12 @@
 /**
- * ⚡ TWP (Telegram Worker Proxy) Core Engine v2.2
- * High-Performance Serverless Telegram WEB Proxy Relay for Cloudflare Workers
+ * ⚡ TWP (Telegram Worker Proxy) Core Engine v2.3
+ * High-Performance Serverless Telegram WEB Proxy Relay for Cloudflare Workers & Pages
  *
  * Implements the official Telegram WEB Proxy wire contract (tproxy v1):
  * - In-Worker Obfuscated2 Engine (Zero-Copy Downlink, AES-CTR Uplink Re-encryption)
  * - Dynamic Datacenter Selection (DC1 - DC5 over Cloudflare Anycast Sockets)
  * - Multiplexed WebSocket Carrier with Seamless Multi-Lane Rollover
- * - Dual-mode: Direct tg://webproxy bridge & Camouflaged / Interactive Web Dashboard
+ * - Dual-mode: Direct tg://webproxy bridge & ADMIN-protected Dashboard with Stealth Camouflage
  *
  * Specification: https://github.com/Qorvhex/TWP
  * License: MIT
@@ -51,6 +51,9 @@ const CARRIER_PING_MS         = 20000;            // 20s keep-alive & token rene
 const TOKEN_TTL_BOOTSTRAP = 120;                  // 2 minutes
 const TOKEN_TTL_SESSION   = 600;                  // 10 minutes
 const TOKEN_TTL_RENEWAL   = 3600;                 // 1 hour renewal grace
+
+const DEFAULT_SECRET_HEX        = '000102030405060708090a0b0c0d0e0f';
+const DEFAULT_SECRET_PADDED_HEX = 'dd000102030405060708090a0b0c0d0e0f';
 
 /**
  * Official Telegram Datacenter IPv4 Endpoints (Standard Port 443).
@@ -306,14 +309,16 @@ async function applyAesCtr(cipher, byteOffset, inputData) {
 
 let cachedConfig = null;
 
-function resolveConfig(env) {
-  const secretInput = typeof env?.PROXY_SECRET === 'string'
-    ? env.PROXY_SECRET
-    : typeof env?.SECRET === 'string'
-    ? env.SECRET
-    : '';
+function extractSecretInput(env) {
+  const proxySecret = typeof env?.PROXY_SECRET === 'string' ? env.PROXY_SECRET.trim() : '';
+  if (proxySecret) return proxySecret;
+  const secret = typeof env?.SECRET === 'string' ? env.SECRET.trim() : '';
+  return secret;
+}
 
-  const rawSecret = secretInput.trim().toLowerCase() || '000102030405060708090a0b0c0d0e0f';
+function resolveConfig(env) {
+  const secretInput = extractSecretInput(env);
+  const rawSecret = secretInput.toLowerCase() || DEFAULT_SECRET_HEX;
 
   if (!cachedConfig || cachedConfig.raw !== rawSecret) {
     const promise = buildConfigKeys(rawSecret).catch((err) => {
@@ -323,6 +328,19 @@ function resolveConfig(env) {
     cachedConfig = { raw: rawSecret, value: promise };
   }
   return cachedConfig.value;
+}
+
+function resolveAdminPath(env) {
+  if (typeof env?.ADMIN !== 'string') return null;
+  const trimmed = env.ADMIN.trim().replace(/^\/+|\/+$/g, '');
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function isDefaultSecret(env, config) {
+  const secretInput = extractSecretInput(env).toLowerCase();
+  if (!secretInput) return true;
+  const activeHex = config ? toHex(config.fullBytes) : secretInput;
+  return activeHex === DEFAULT_SECRET_HEX || activeHex === DEFAULT_SECRET_PADDED_HEX;
 }
 
 async function buildConfigKeys(rawSecret) {
@@ -1141,20 +1159,164 @@ Based on jsqrencode | (C) 2010 tz@execpc.com | GPL v3 License
 
 //# sourceMappingURL=qrious.min.js.map`;
 
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function generateRandomHexClientSeed(byteLen = 16) {
+  const bytes = new Uint8Array(byteLen);
+  crypto.getRandomValues(bytes);
+  return toHex(bytes);
+}
+
+function generateRandomAdminSeed() {
+  const bytes = new Uint8Array(4);
+  crypto.getRandomValues(bytes);
+  return 'panel-' + toHex(bytes);
+}
+
 /**
  * Renders the AMOLED Dark, responsive, bilingual (Persian & English)
- * dashboard with self-contained QR code generation and one-click Telegram connect.
+ * dashboard with self-contained QR code generation, optional security warning,
+ * and one-click Telegram connect.
  */
-function renderTwpDashboard(hostname, secretHex) {
-  const deepLink = "tg://webproxy?server=" + hostname + "&secret=" + secretHex;
-  const webLink = "https://t.me/webproxy?server=" + hostname + "&secret=" + secretHex;
+function renderTwpDashboard(hostname, secretHex, securityStatus = {}) {
+  const adminMissing = Boolean(securityStatus.adminMissing);
+  const secretDefault = Boolean(securityStatus.secretDefault);
+  const showSecurityWarning = adminMissing || secretDefault;
+
+  const deepLink = 'tg://webproxy?server=' + hostname + '&secret=' + secretHex;
+  const webLink = 'https://t.me/webproxy?server=' + hostname + '&secret=' + secretHex;
+  const safeHostname = escapeHtml(hostname);
+  const safeDeepLink = escapeHtml(deepLink);
+  const safeWebLink = escapeHtml(webLink);
+  const suggestedSecret = generateRandomHexClientSeed(16);
+  const suggestedAdmin = generateRandomAdminSeed();
+
+  const initialSecSub = adminMissing && secretDefault
+    ? 'متغیرهای ADMIN و SECRET تنظیم نشده‌اند'
+    : adminMissing
+    ? 'متغیر ADMIN تنظیم نشده است'
+    : 'متغیر SECRET همچنان پیش‌فرض است';
+
+  const initialSummary = adminMissing && secretDefault
+    ? 'شما هنوز متغیرهای <code>ADMIN</code> و <code>SECRET</code> را ثبت یا تغییر نداده‌اید.'
+    : adminMissing
+    ? 'شما هنوز متغیر <code>ADMIN</code> را ثبت نکرده‌اید.'
+    : 'شما هنوز متغیر <code>SECRET</code> را از مقدار پیش‌فرض تغییر نداده‌اید.';
+
+  const securityBannerMarkup = showSecurityWarning ? `
+      <section class="security-banner" aria-labelledby="txt-sec-title">
+        <div class="security-banner-left">
+          <div class="security-icon-box" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+              <line x1="12" y1="9" x2="12" y2="13"></line>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+          </div>
+          <div class="security-banner-info">
+            <span class="security-banner-title" id="txt-sec-title">هشدار امنیتی</span>
+            <span class="security-banner-sub" id="txt-sec-sub">${initialSecSub}</span>
+          </div>
+        </div>
+        <button type="button" id="btn-sec-view" class="security-banner-action">
+          <span id="txt-sec-view">مشاهده</span>
+        </button>
+      </section>` : '';
+
+  const securityDialogMarkup = showSecurityWarning ? `
+  <dialog id="security-modal" class="sec-modal" closedby="any" aria-labelledby="sec-modal-title">
+    <div class="sec-modal-header">
+      <div class="sec-modal-heading-wrap">
+        <span class="sec-modal-badge" aria-hidden="true">!</span>
+        <h2 id="sec-modal-title">هشدار امنیتی</h2>
+      </div>
+      <form method="dialog">
+        <button type="submit" id="btn-sec-close" class="sec-modal-close" aria-label="بستن">✕</button>
+      </form>
+    </div>
+
+    <div class="sec-modal-body">
+      <div class="sec-status-pills">
+        <div class="sec-pill ${adminMissing ? 'is-warn' : 'is-ok'}">
+          <span>ADMIN</span>
+          <strong id="sec-pill-admin">${adminMissing ? 'تنظیم نشده' : 'تنظیم شده ✓'}</strong>
+        </div>
+        <div class="sec-pill ${secretDefault ? 'is-warn' : 'is-ok'}">
+          <span>SECRET</span>
+          <strong id="sec-pill-secret">${secretDefault ? 'پیش‌فرض (ناامن)' : 'شخصی‌سازی شده ✓'}</strong>
+        </div>
+      </div>
+
+      <p class="sec-summary" id="sec-summary-msg">${initialSummary}</p>
+
+      <div class="sec-block">
+        <h3 id="sec-risks-title">خطرات امنیتی این وضعیت</h3>
+        <ul class="sec-list">
+          ${adminMissing ? '<li id="sec-risk-admin"><strong>نبود متغیر ADMIN:</strong> پنل مدیریت پروکسی مستقیماً روی آدرس اصلی ورکر باز می‌شود و خزنده‌ها، ربات‌ها و سیستم‌های فیلترینگ خیلی سریع متوجه پروکسی بودن دامنه شما شده و آن را مسدود می‌کنند.</li>' : ''}
+          ${secretDefault ? '<li id="sec-risk-secret"><strong>تغییر ندادن SECRET:</strong> کلید پیش‌فرض عمومی است؛ هر فردی می‌تواند با این کلید به پروکسی شما وصل شود، سهمیه ورکر را مصرف کند یا ترافیک را شناسایی نماید.</li>' : ''}
+        </ul>
+      </div>
+
+      <div class="sec-block">
+        <h3 id="sec-guide-title">آموزش تنظیم سریع در کلادفلر</h3>
+        <p class="sec-guide-intro" id="sec-guide-intro">در داشبورد کلادفلر وارد پروژه خود شوید و از مسیر <strong>Settings &rarr; Variables and Secrets</strong> متغیر زیر را اضافه و سپس <strong>Save / Deploy</strong> کنید:</p>
+
+        ${adminMissing ? `
+        <div class="sec-var-box">
+          <div class="sec-var-head">
+            <code class="sec-var-name">ADMIN</code>
+            <span class="sec-var-hint" id="sec-hint-admin">مسیر مخفی پنل مدیریت (مثال پیشنهادی بدون فاصله)</span>
+          </div>
+          <p class="sec-var-desc" id="sec-desc-admin">با ثبت این متغیر، آدرس اصلی ورکر به یک سایت عادی و سبک تبدیل می‌شود و پنل مدیریت فقط در <code>WORKERURL/مقدار_ADMIN</code> باز خواهد شد.</p>
+          <div class="sec-copy-row">
+            <code id="rand-admin-val">${suggestedAdmin}</code>
+            <button type="button" id="btn-copy-rand-admin" class="btn-copy"><span class="btn-lbl" id="lbl-copy-admin">کپی</span></button>
+          </div>
+        </div>` : ''}
+
+        ${secretDefault ? `
+        <div class="sec-var-box">
+          <div class="sec-var-head">
+            <code class="sec-var-name">SECRET</code>
+            <span class="sec-var-hint" id="sec-hint-secret">کلید اختصاصی ۳۲ کاراکتری هگز (پیشنهاد تصادفی امن)</span>
+          </div>
+          <p class="sec-var-desc" id="sec-desc-secret">مقدار تصادفی زیر را کپی و به‌عنوان <code>SECRET</code> ثبت کنید. پس از ذخیره، لینک جدید اتصال را از پنل بردارید.</p>
+          <div class="sec-copy-row">
+            <code id="rand-secret-val">${suggestedSecret}</code>
+            <div class="sec-copy-actions">
+              <button type="button" id="btn-regen-secret" class="btn-copy btn-sub"><span id="lbl-regen-secret">جدید</span></button>
+              <button type="button" id="btn-copy-rand-secret" class="btn-copy"><span class="btn-lbl" id="lbl-copy-secret">کپی</span></button>
+            </div>
+          </div>
+        </div>` : ''}
+      </div>
+
+      <div class="sec-bot-box">
+        <p id="sec-bot-desc">اگر با تنظیمات کلادفلر آشنا نیستید یا زمان کافی ندارید، وارد ربات دیپلویر شوید تا تمام مراحل و متغیرهای امنیتی به‌صورت خودکار انجام شود:</p>
+        <a href="https://t.me/qorvhexdeployer_bot" target="_blank" rel="noopener noreferrer" class="sec-bot-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
+          </svg>
+          <span id="sec-bot-btn-lbl">ورود به ربات دیپلویر (@qorvhexdeployer_bot)</span>
+        </a>
+      </div>
+    </div>
+  </dialog>` : '';
 
   const html = `<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>⚡ TWP Core v2.2 | Telegram WEB Proxy</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>⚡ TWP Core v2.3 | Telegram WEB Proxy</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Vazirmatn:wght@400;500;700;900&display=swap');
 
@@ -1166,6 +1328,9 @@ function renderTwpDashboard(hostname, secretHex) {
       --widget-hover: #383838;
       --accent-red: #D71921;
       --accent-red-glow: rgba(215, 25, 33, 0.3);
+      --accent-warn: #F59E0B;
+      --accent-warn-glow: rgba(245, 158, 11, 0.22);
+      --accent-ok: #22C55E;
       --text: #ffffff;
       --text-muted: #a3a3a3;
       --text-dim: #777777;
@@ -1209,10 +1374,16 @@ function renderTwpDashboard(hostname, secretHex) {
     [dir="rtl"] .detail-label,
     [dir="rtl"] .guide-header,
     [dir="rtl"] h1,
+    [dir="rtl"] h2,
+    [dir="rtl"] h3,
     [dir="rtl"] .desc,
     [dir="rtl"] .status-badge,
     [dir="rtl"] .qr-caption,
-    [dir="rtl"] .btn-lbl {
+    [dir="rtl"] .btn-lbl,
+    [dir="rtl"] .security-banner-title,
+    [dir="rtl"] .security-banner-sub,
+    [dir="rtl"] .security-banner-action,
+    [dir="rtl"] .sec-modal {
       letter-spacing: normal !important;
       font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Tahoma, Arial, sans-serif !important;
     }
@@ -1315,6 +1486,396 @@ function renderTwpDashboard(hostname, secretHex) {
     .title-area {
       text-align: center;
       margin-bottom: 1.4rem;
+    }
+
+    /* Security Warning Banner */
+    .security-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      background: linear-gradient(135deg, var(--accent-warn-glow) 0%, #141414 75%);
+      border: 1px solid rgba(245, 158, 11, 0.5);
+      border-radius: 18px;
+      padding: 0.85rem 1rem;
+      margin-bottom: 0.85rem;
+      width: 100%;
+      box-sizing: border-box;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), 0 0 14px rgba(245, 158, 11, 0.12);
+    }
+
+    .security-banner-left {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .security-icon-box {
+      width: 38px;
+      height: 38px;
+      background: var(--accent-warn);
+      color: #000000;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .security-banner-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+      text-align: start;
+    }
+
+    .security-banner-title {
+      font-size: 0.9rem;
+      font-weight: 800;
+      color: #fde68a;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .security-banner-sub {
+      font-size: 0.72rem;
+      color: #e5e5e5;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .security-banner-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--accent-warn);
+      color: #000000;
+      border: none;
+      font-weight: 800;
+      font-size: 0.76rem;
+      padding: 0.45rem 0.9rem;
+      border-radius: 9999px;
+      flex-shrink: 0;
+      cursor: pointer;
+      transition: transform 0.15s ease, background-color 0.2s ease;
+    }
+
+    .security-banner-action:hover:not(:disabled) {
+      background: #fbbf24;
+      transform: translateY(-1px);
+    }
+
+    .security-banner-action:focus-visible,
+    .sec-modal-close:focus-visible,
+    .btn-copy:focus-visible,
+    .sec-bot-btn:focus-visible {
+      outline: 2px solid #ffffff;
+      outline-offset: 2px;
+    }
+
+    /* Native Modal Dialog */
+    dialog.sec-modal {
+      margin: auto;
+      width: min(460px, calc(100vw - 1.5rem));
+      max-height: calc(100dvh - 2rem);
+      background: #101010;
+      color: var(--text);
+      border: 1px solid #303030;
+      border-radius: 22px;
+      padding: 0;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.88);
+      overflow-y: auto;
+    }
+
+    dialog.sec-modal:modal {
+      overscroll-behavior: contain;
+    }
+
+    dialog.sec-modal::backdrop {
+      background: rgba(0, 0, 0, 0.78);
+      backdrop-filter: blur(4px);
+      overflow: hidden;
+      overscroll-behavior: contain;
+    }
+
+    .sec-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 1rem 1.15rem;
+      border-bottom: 1px solid var(--widget-border);
+      background: #141414;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+
+    .sec-modal-heading-wrap {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      min-width: 0;
+    }
+
+    .sec-modal-badge {
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      background: var(--accent-warn);
+      color: #000000;
+      font-weight: 900;
+      font-size: 0.9rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .sec-modal-header h2 {
+      font-size: 1rem;
+      font-weight: 800;
+      color: #ffffff;
+    }
+
+    .sec-modal-close {
+      width: 32px;
+      height: 32px;
+      border-radius: 9999px;
+      border: 1px solid #333333;
+      background: #1c1c1c;
+      color: #ffffff;
+      font-size: 0.9rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background-color 0.2s, border-color 0.2s;
+    }
+
+    .sec-modal-close:hover {
+      background: #2a2a2a;
+      border-color: #666666;
+    }
+
+    .sec-modal-body {
+      padding: 1.1rem 1.15rem 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.95rem;
+      font-size: 0.82rem;
+      line-height: 1.65;
+    }
+
+    .sec-status-pills {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.55rem;
+    }
+
+    .sec-pill {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.4rem;
+      padding: 0.5rem 0.7rem;
+      border-radius: 12px;
+      background: var(--widget-bg);
+      border: 1px solid var(--widget-border);
+      font-size: 0.73rem;
+    }
+
+    .sec-pill span {
+      font-family: var(--mono-font);
+      color: var(--text-muted);
+      font-weight: 700;
+    }
+
+    .sec-pill.is-warn {
+      border-color: rgba(245, 158, 11, 0.45);
+      background: rgba(245, 158, 11, 0.08);
+    }
+
+    .sec-pill.is-warn strong {
+      color: #fbbf24;
+    }
+
+    .sec-pill.is-ok {
+      border-color: rgba(34, 197, 94, 0.4);
+      background: rgba(34, 197, 94, 0.08);
+    }
+
+    .sec-pill.is-ok strong {
+      color: #4ade80;
+    }
+
+    .sec-summary {
+      background: rgba(215, 25, 33, 0.12);
+      border: 1px solid rgba(215, 25, 33, 0.38);
+      border-radius: 14px;
+      padding: 0.75rem 0.9rem;
+      color: #ffffff;
+      font-weight: 600;
+    }
+
+    .sec-summary code,
+    .sec-var-desc code {
+      font-family: var(--mono-font);
+      background: rgba(255, 255, 255, 0.1);
+      padding: 0.05rem 0.35rem;
+      border-radius: 6px;
+      font-size: 0.76rem;
+      direction: ltr;
+      display: inline-block;
+    }
+
+    .sec-block {
+      background: var(--widget-bg);
+      border: 1px solid var(--widget-border);
+      border-radius: 16px;
+      padding: 0.9rem 0.95rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+
+    .sec-block h3 {
+      font-size: 0.85rem;
+      font-weight: 800;
+      color: #ffffff;
+    }
+
+    .sec-list {
+      padding-inline-start: 1.1rem;
+      color: #d4d4d4;
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+      font-size: 0.78rem;
+    }
+
+    .sec-guide-intro {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+    }
+
+    .sec-var-box {
+      background: #0b0b0b;
+      border: 1px solid #2a2a2a;
+      border-radius: 12px;
+      padding: 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+    }
+
+    .sec-var-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+
+    .sec-var-name {
+      font-family: var(--mono-font);
+      font-size: 0.76rem;
+      font-weight: 700;
+      color: #fbbf24;
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      padding: 0.15rem 0.5rem;
+      border-radius: 8px;
+    }
+
+    .sec-var-hint {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+    }
+
+    .sec-var-desc {
+      font-size: 0.75rem;
+      color: #cccccc;
+    }
+
+    .sec-copy-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.45rem;
+      background: #141414;
+      border: 1px solid #2b2b2b;
+      border-radius: 10px;
+      padding: 0.45rem 0.65rem;
+      min-width: 0;
+    }
+
+    .sec-copy-row code {
+      font-family: var(--mono-font);
+      font-size: 0.74rem;
+      color: #ffffff;
+      direction: ltr;
+      text-align: left;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1 1 0%;
+      min-width: 0;
+    }
+
+    .sec-copy-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      flex-shrink: 0;
+    }
+
+    .btn-copy.btn-sub {
+      min-width: auto;
+      padding: 0.35rem 0.6rem;
+      color: var(--text-muted);
+    }
+
+    .sec-bot-box {
+      background: linear-gradient(135deg, rgba(44, 165, 224, 0.14) 0%, #141414 75%);
+      border: 1px solid rgba(44, 165, 224, 0.38);
+      border-radius: 16px;
+      padding: 0.9rem 0.95rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+    }
+
+    .sec-bot-box p {
+      font-size: 0.77rem;
+      color: #e5e5e5;
+    }
+
+    .sec-bot-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      width: 100%;
+      padding: 0.65rem 0.9rem;
+      border-radius: 9999px;
+      background: #ffffff;
+      color: #000000;
+      text-decoration: none;
+      font-weight: 800;
+      font-size: 0.8rem;
+      transition: background-color 0.2s, transform 0.15s;
+    }
+
+    .sec-bot-btn:hover {
+      background: #e5e5e5;
+      transform: translateY(-1px);
     }
 
     /* Eye-Catching Qorvhex Channel Bento Banner */
@@ -1555,7 +2116,7 @@ function renderTwpDashboard(hostname, secretHex) {
       text-align: center;
     }
 
-    .btn-copy:hover {
+    .btn-copy:hover:not(:disabled) {
       border-color: #666666;
       background: rgba(255, 255, 255, 0.05);
     }
@@ -1629,7 +2190,6 @@ function renderTwpDashboard(hostname, secretHex) {
       border-color: var(--widget-hover);
     }
 
-    /* Long domain and protocol span full card width for perfect responsiveness */
     .detail-item.span-2 {
       grid-column: span 2;
     }
@@ -1774,7 +2334,8 @@ function renderTwpDashboard(hostname, secretHex) {
         padding: 1.25rem 0.85rem;
         border-radius: 20px;
       }
-      .details-grid {
+      .details-grid,
+      .sec-status-pills {
         grid-template-columns: 1fr;
       }
       .detail-item.span-2 {
@@ -1798,16 +2359,18 @@ function renderTwpDashboard(hostname, secretHex) {
         <span id="txt-status">آنلاین • آماده اتصال</span>
       </div>
       <div class="lang-toggle">
-        <button id="btn-fa" class="lang-btn active" onclick="setLang('fa')">FA</button>
-        <button id="btn-en" class="lang-btn" onclick="setLang('en')">EN</button>
+        <button type="button" id="btn-fa" class="lang-btn active">FA</button>
+        <button type="button" id="btn-en" class="lang-btn">EN</button>
       </div>
     </div>
 
     <div class="card">
+      ${securityBannerMarkup}
+
       <!-- Eye-Catching Qorvhex Channel Banner -->
       <a href="https://t.me/Qorvhex_Channel" target="_blank" rel="noopener noreferrer" class="channel-banner">
         <div class="channel-banner-left">
-          <div class="telegram-icon-box">
+          <div class="telegram-icon-box" aria-hidden="true">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
             </svg>
@@ -1819,32 +2382,32 @@ function renderTwpDashboard(hostname, secretHex) {
         </div>
         <div class="channel-banner-action">
           <span id="txt-channel-join">عضویت</span>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
         </div>
       </a>
 
       <div class="title-area">
-        <h1 id="txt-title">⚡ وب‌پروکسی تلگرام (TWP Core v2.2)</h1>
+        <h1 id="txt-title">⚡ وب‌پروکسی تلگرام (TWP Core v2.3)</h1>
         <p class="desc" id="txt-desc">سرورلس روی لبه کلادفلر با فناوری رمزنگاری مستقیم و دانلود صفر-کپی</p>
       </div>
 
-      <a href="${deepLink}" class="main-connect-btn">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+      <a href="${safeDeepLink}" class="main-connect-btn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
         </svg>
         <span id="txt-connect-btn">اتصال مستقیم به تلگرام</span>
       </a>
 
       <div class="link-box">
-        <code>${deepLink}</code>
-        <button class="btn-copy" onclick="copyText('${deepLink}', this)">
+        <code>${safeDeepLink}</code>
+        <button type="button" id="btn-copy-deep" class="btn-copy">
           <span class="btn-lbl" id="txt-copy-deep">کپی لینک</span>
         </button>
       </div>
 
       <div class="link-box">
-        <code>${webLink}</code>
-        <button class="btn-copy" onclick="copyText('${webLink}', this)">
+        <code>${safeWebLink}</code>
+        <button type="button" id="btn-copy-web" class="btn-copy">
           <span class="btn-lbl" id="txt-copy-web">اشتراک</span>
         </button>
       </div>
@@ -1859,7 +2422,7 @@ function renderTwpDashboard(hostname, secretHex) {
       <div class="details-grid">
         <div class="detail-item span-2">
           <div class="detail-label" id="lbl-server">سرور / دامنه</div>
-          <div class="detail-val">${hostname}</div>
+          <div class="detail-val">${safeHostname}</div>
         </div>
         <div class="detail-item">
           <div class="detail-label" id="lbl-port">پورت اتصال</div>
@@ -1874,7 +2437,7 @@ function renderTwpDashboard(hostname, secretHex) {
           <div class="detail-val">
             <a href="https://github.com/telegramdesktop/tproxy-server" target="_blank" rel="noopener noreferrer" class="proto-link">
               <span>Telegram WEB Proxy v1</span>
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
             </a>
           </div>
         </div>
@@ -1891,17 +2454,22 @@ function renderTwpDashboard(hostname, secretHex) {
     </div>
 
     <footer>
-      TWP Core v2.2 • Powered by Cloudflare Workers • <a href="https://github.com/Qorvhex/TWP" target="_blank">GitHub</a>
+      TWP Core v2.3 • Powered by Cloudflare Workers • <a href="https://github.com/Qorvhex/TWP" target="_blank" rel="noopener noreferrer">GitHub</a>
     </footer>
   </div>
+  ${securityDialogMarkup}
 
   <script>${qriousCode}</script>
   <script>
+    const DEEP_LINK = ${JSON.stringify(deepLink)};
+    const WEB_LINK = ${JSON.stringify(webLink)};
+    const SEC_STATE = ${JSON.stringify({ adminMissing, secretDefault })};
+
     // QR Code rendering with high-contrast monochrome Nothing OS theme
     try {
       new QRious({
         element: document.getElementById('qr-canvas'),
-        value: '${deepLink}',
+        value: DEEP_LINK,
         size: 200,
         background: '#000000',
         foreground: '#ffffff',
@@ -1912,7 +2480,7 @@ function renderTwpDashboard(hostname, secretHex) {
     // Clipboard copy with robust fallback
     function copyText(str, btn) {
       function markCopied() {
-        const lbl = btn.querySelector('.btn-lbl');
+        const lbl = btn.querySelector('.btn-lbl') || btn;
         const orig = lbl.getAttribute('data-orig') || lbl.innerText;
         lbl.setAttribute('data-orig', orig);
         btn.classList.add('copied');
@@ -1947,11 +2515,20 @@ function renderTwpDashboard(hostname, secretHex) {
       }
     }
 
-    // Bilingual i18n
+    function generateHexSecret() {
+      const arr = new Uint8Array(16);
+      if (window.crypto && window.crypto.getRandomValues) {
+        window.crypto.getRandomValues(arr);
+      } else {
+        for (let i = 0; i < arr.length; i++) arr[i] = Math.floor(Math.random() * 256);
+      }
+      return Array.from(arr, function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+    }
+
     const i18n = {
       fa: {
         status: 'آنلاین • آماده اتصال',
-        title: '⚡ وب‌پروکسی تلگرام (TWP Core v2.2)',
+        title: '⚡ وب‌پروکسی تلگرام (TWP Core v2.3)',
         desc: 'سرورلس روی لبه کلادفلر با فناوری رمزنگاری مستقیم و دانلود صفر-کپی',
         channelSub: 'کانال رسمی تلگرام • اخبار، آپدیت‌ها و پروکسی',
         channelJoin: 'عضویت',
@@ -1966,11 +2543,37 @@ function renderTwpDashboard(hostname, secretHex) {
         guideTitle: 'راهنمای اتصال سریع:',
         g1: 'روی دکمه «اتصال مستقیم به تلگرام» کلیک کنید تا پروکسی در اپلیکیشن باز شود.',
         g2: 'در پنجره باز شده تلگرام، دکمه «Connect Proxy» را بزنید.',
-        g3: 'این پروتکل نیاز به هیچ اپلیکیشن جانبی یا فیلترشکن ندارد و مستقیم به شبکه لبه متصل می‌شود.'
+        g3: 'این پروتکل نیاز به هیچ اپلیکیشن جانبی یا فیلترشکن ندارد و مستقیم به شبکه لبه متصل می‌شود.',
+        secTitle: 'هشدار امنیتی',
+        secView: 'مشاهده',
+        secCloseLabel: 'بستن',
+        secSubBoth: 'متغیرهای ADMIN و SECRET تنظیم نشده‌اند',
+        secSubAdmin: 'متغیر ADMIN تنظیم نشده است',
+        secSubSecret: 'متغیر SECRET همچنان پیش‌فرض است',
+        secPillWarnAdmin: 'تنظیم نشده',
+        secPillOkAdmin: 'تنظیم شده ✓',
+        secPillWarnSecret: 'پیش‌فرض (ناامن)',
+        secPillOkSecret: 'شخصی‌سازی شده ✓',
+        secSumBoth: 'شما هنوز متغیرهای <code>ADMIN</code> و <code>SECRET</code> را ثبت یا تغییر نداده‌اید.',
+        secSumAdmin: 'شما هنوز متغیر <code>ADMIN</code> را ثبت نکرده‌اید.',
+        secSumSecret: 'شما هنوز متغیر <code>SECRET</code> را از مقدار پیش‌فرض تغییر نداده‌اید.',
+        secRisksTitle: 'خطرات امنیتی این وضعیت',
+        secRiskAdmin: '<strong>نبود متغیر ADMIN:</strong> پنل مدیریت پروکسی مستقیماً روی آدرس اصلی ورکر باز می‌شود و خزنده‌ها، ربات‌ها و سیستم‌های فیلترینگ خیلی سریع متوجه پروکسی بودن دامنه شما شده و آن را مسدود می‌کنند.',
+        secRiskSecret: '<strong>تغییر ندادن SECRET:</strong> کلید پیش‌فرض عمومی است؛ هر فردی می‌تواند با این کلید به پروکسی شما وصل شود، سهمیه ورکر را مصرف کند یا ترافیک را شناسایی نماید.',
+        secGuideTitle: 'آموزش تنظیم سریع در کلادفلر',
+        secGuideIntro: 'در داشبورد کلادفلر وارد پروژه خود شوید و از مسیر <strong>Settings &rarr; Variables and Secrets</strong> متغیر زیر را اضافه و سپس <strong>Save / Deploy</strong> کنید:',
+        secHintAdmin: 'مسیر مخفی پنل مدیریت (مثال پیشنهادی بدون فاصله)',
+        secDescAdmin: 'با ثبت این متغیر، آدرس اصلی ورکر به یک سایت عادی و سبک تبدیل می‌شود و پنل مدیریت فقط در <code>WORKERURL/مقدار_ADMIN</code> باز خواهد شد.',
+        secHintSecret: 'کلید اختصاصی ۳۲ کاراکتری هگز (پیشنهاد تصادفی امن)',
+        secDescSecret: 'مقدار تصادفی زیر را کپی و به‌عنوان <code>SECRET</code> ثبت کنید. پس از ذخیره، لینک جدید اتصال را از پنل بردارید.',
+        copyShort: 'کپی',
+        regenShort: 'جدید',
+        secBotDesc: 'اگر با تنظیمات کلادفلر آشنا نیستید یا زمان کافی ندارید، وارد ربات دیپلویر شوید تا تمام مراحل و متغیرهای امنیتی به‌صورت خودکار انجام شود:',
+        secBotBtn: 'ورود به ربات دیپلویر (@qorvhexdeployer_bot)'
       },
       en: {
         status: 'ONLINE // READY',
-        title: '⚡ Telegram WEB Proxy (TWP Core v2.2)',
+        title: '⚡ Telegram WEB Proxy (TWP Core v2.3)',
         desc: 'High-performance serverless relay on Cloudflare Workers with zero-copy downlink',
         channelSub: 'Official Telegram Channel • Updates & Proxies',
         channelJoin: 'JOIN',
@@ -1985,11 +2588,47 @@ function renderTwpDashboard(hostname, secretHex) {
         guideTitle: 'Quick Setup Guide:',
         g1: 'Tap "Direct Connect to Telegram" to open the proxy in your client.',
         g2: 'In the Telegram modal prompt, tap "Connect Proxy".',
-        g3: 'No third-party apps required; runs purely over serverless Anycast edge.'
+        g3: 'No third-party apps required; runs purely over serverless Anycast edge.',
+        secTitle: 'Security Warning',
+        secView: 'View',
+        secCloseLabel: 'Close',
+        secSubBoth: 'ADMIN & SECRET variables are not configured',
+        secSubAdmin: 'ADMIN path variable is not set',
+        secSubSecret: 'SECRET is still using the public default',
+        secPillWarnAdmin: 'Not set',
+        secPillOkAdmin: 'Configured ✓',
+        secPillWarnSecret: 'Default (unsafe)',
+        secPillOkSecret: 'Customized ✓',
+        secSumBoth: 'You have not configured <code>ADMIN</code> or changed the default <code>SECRET</code> yet.',
+        secSumAdmin: 'You have not configured the <code>ADMIN</code> path variable yet.',
+        secSumSecret: 'You have not changed <code>SECRET</code> from the public default value.',
+        secRisksTitle: 'Security Risks',
+        secRiskAdmin: '<strong>Missing ADMIN:</strong> Your proxy dashboard is publicly exposed on the root URL (/), making it easy for censorship crawlers and scanners to identify and block your domain.',
+        secRiskSecret: '<strong>Default SECRET:</strong> The default key is public; anyone can connect through your proxy quota and traffic patterns become easier to fingerprint.',
+        secGuideTitle: 'Quick Cloudflare Setup Guide',
+        secGuideIntro: 'Open your Worker or Pages project in Cloudflare Dashboard, go to <strong>Settings &rarr; Variables and Secrets</strong>, add the variable(s) below, and click <strong>Save / Deploy</strong>:',
+        secHintAdmin: 'Secret admin panel path slug (no spaces)',
+        secDescAdmin: 'Once set, the root URL serves a lightweight normal website and your panel moves exclusively to <code>WORKERURL/ADMIN_VALUE</code>.',
+        secHintSecret: 'Private 32-char hex secret (secure random suggestion)',
+        secDescSecret: 'Copy the generated value below and save it as <code>SECRET</code>. Afterward, reopen the panel to grab your updated link.',
+        copyShort: 'Copy',
+        regenShort: 'New',
+        secBotDesc: 'Not sure how or short on time? Use our Deployer Bot to set up the worker and security variables automatically:',
+        secBotBtn: 'Open Deployer Bot (@qorvhexdeployer_bot)'
       }
     };
 
     let currentLang = 'fa';
+
+    function setElText(id, text) {
+      const el = document.getElementById(id);
+      if (el) el.innerText = text;
+    }
+
+    function setElHtml(id, htmlStr) {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = htmlStr;
+    }
 
     function setLang(lang) {
       if (!i18n[lang]) return;
@@ -2002,25 +2641,131 @@ function renderTwpDashboard(hostname, secretHex) {
       document.getElementById('btn-en').classList.toggle('active', lang === 'en');
 
       const t = i18n[lang];
-      document.getElementById('txt-status').innerText = t.status;
-      document.getElementById('txt-title').innerText = t.title;
-      document.getElementById('txt-desc').innerText = t.desc;
-      if (document.getElementById('txt-channel-sub')) document.getElementById('txt-channel-sub').innerText = t.channelSub;
-      if (document.getElementById('txt-channel-join')) document.getElementById('txt-channel-join').innerText = t.channelJoin;
-      document.getElementById('txt-connect-btn').innerText = t.connectBtn;
-      document.getElementById('txt-copy-deep').innerText = t.copyDeep;
-      document.getElementById('txt-copy-web').innerText = t.copyWeb;
-      document.getElementById('txt-qr-caption').innerText = t.qrCaption;
-      document.getElementById('lbl-server').innerText = t.server;
-      document.getElementById('lbl-port').innerText = t.port;
-      document.getElementById('lbl-proto').innerText = t.proto;
-      document.getElementById('lbl-enc').innerText = t.enc;
-      document.getElementById('txt-guide-title').innerText = t.guideTitle;
-      document.getElementById('txt-g1').innerText = t.g1;
-      document.getElementById('txt-g2').innerText = t.g2;
-      document.getElementById('txt-g3').innerText = t.g3;
+      setElText('txt-status', t.status);
+      setElText('txt-title', t.title);
+      setElText('txt-desc', t.desc);
+      setElText('txt-channel-sub', t.channelSub);
+      setElText('txt-channel-join', t.channelJoin);
+      setElText('txt-connect-btn', t.connectBtn);
+      setElText('txt-copy-deep', t.copyDeep);
+      setElText('txt-copy-web', t.copyWeb);
+      setElText('txt-qr-caption', t.qrCaption);
+      setElText('lbl-server', t.server);
+      setElText('lbl-port', t.port);
+      setElText('lbl-proto', t.proto);
+      setElText('lbl-enc', t.enc);
+      setElText('txt-guide-title', t.guideTitle);
+      setElText('txt-g1', t.g1);
+      setElText('txt-g2', t.g2);
+      setElText('txt-g3', t.g3);
+
+      const dBtn = document.getElementById('txt-copy-deep');
+      if (dBtn) dBtn.setAttribute('data-orig', t.copyDeep);
+      const wBtn = document.getElementById('txt-copy-web');
+      if (wBtn) wBtn.setAttribute('data-orig', t.copyWeb);
+
+      if (SEC_STATE.adminMissing || SEC_STATE.secretDefault) {
+        setElText('txt-sec-title', t.secTitle);
+        setElText('txt-sec-view', t.secView);
+        setElText('sec-modal-title', t.secTitle);
+        const closeBtn = document.getElementById('btn-sec-close');
+        if (closeBtn) closeBtn.setAttribute('aria-label', t.secCloseLabel);
+
+        const subText = SEC_STATE.adminMissing && SEC_STATE.secretDefault
+          ? t.secSubBoth
+          : SEC_STATE.adminMissing
+          ? t.secSubAdmin
+          : t.secSubSecret;
+        setElText('txt-sec-sub', subText);
+
+        setElText('sec-pill-admin', SEC_STATE.adminMissing ? t.secPillWarnAdmin : t.secPillOkAdmin);
+        setElText('sec-pill-secret', SEC_STATE.secretDefault ? t.secPillWarnSecret : t.secPillOkSecret);
+
+        const sumHtml = SEC_STATE.adminMissing && SEC_STATE.secretDefault
+          ? t.secSumBoth
+          : SEC_STATE.adminMissing
+          ? t.secSumAdmin
+          : t.secSumSecret;
+        setElHtml('sec-summary-msg', sumHtml);
+
+        setElText('sec-risks-title', t.secRisksTitle);
+        setElHtml('sec-risk-admin', t.secRiskAdmin);
+        setElHtml('sec-risk-secret', t.secRiskSecret);
+        setElText('sec-guide-title', t.secGuideTitle);
+        setElHtml('sec-guide-intro', t.secGuideIntro);
+        setElText('sec-hint-admin', t.secHintAdmin);
+        setElHtml('sec-desc-admin', t.secDescAdmin);
+        setElText('sec-hint-secret', t.secHintSecret);
+        setElHtml('sec-desc-secret', t.secDescSecret);
+        setElText('lbl-copy-admin', t.copyShort);
+        setElText('lbl-copy-secret', t.copyShort);
+        setElText('lbl-regen-secret', t.regenShort);
+        setElText('sec-bot-desc', t.secBotDesc);
+        setElText('sec-bot-btn-lbl', t.secBotBtn);
+
+        const ca = document.getElementById('lbl-copy-admin');
+        if (ca) ca.setAttribute('data-orig', t.copyShort);
+        const cs = document.getElementById('lbl-copy-secret');
+        if (cs) cs.setAttribute('data-orig', t.copyShort);
+      }
 
       try { localStorage.setItem('twp_lang', lang); } catch(e) {}
+    }
+
+    document.getElementById('btn-fa').addEventListener('click', function() { setLang('fa'); });
+    document.getElementById('btn-en').addEventListener('click', function() { setLang('en'); });
+    document.getElementById('btn-copy-deep').addEventListener('click', function() { copyText(DEEP_LINK, this); });
+    document.getElementById('btn-copy-web').addEventListener('click', function() { copyText(WEB_LINK, this); });
+
+    const secDialog = document.getElementById('security-modal');
+    const secViewBtn = document.getElementById('btn-sec-view');
+    if (secDialog && secViewBtn) {
+      secViewBtn.addEventListener('click', function() {
+        if (typeof secDialog.showModal === 'function') {
+          secDialog.showModal();
+        } else {
+          secDialog.setAttribute('open', '');
+        }
+      });
+
+      if (!('closedBy' in HTMLDialogElement.prototype)) {
+        const isOutsideDialog = function(e) {
+          const r = secDialog.getBoundingClientRect();
+          return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+        };
+        let pressedOutside = false;
+        secDialog.addEventListener('pointerdown', function(e) {
+          pressedOutside = isOutsideDialog(e);
+        });
+        secDialog.addEventListener('pointerup', function(e) {
+          if (pressedOutside && isOutsideDialog(e)) secDialog.close();
+          pressedOutside = false;
+        });
+      }
+
+      const copyAdminBtn = document.getElementById('btn-copy-rand-admin');
+      if (copyAdminBtn) {
+        copyAdminBtn.addEventListener('click', function() {
+          const val = document.getElementById('rand-admin-val');
+          if (val) copyText(val.innerText, this);
+        });
+      }
+
+      const copySecretBtn = document.getElementById('btn-copy-rand-secret');
+      if (copySecretBtn) {
+        copySecretBtn.addEventListener('click', function() {
+          const val = document.getElementById('rand-secret-val');
+          if (val) copyText(val.innerText, this);
+        });
+      }
+
+      const regenSecretBtn = document.getElementById('btn-regen-secret');
+      if (regenSecretBtn) {
+        regenSecretBtn.addEventListener('click', function() {
+          const val = document.getElementById('rand-secret-val');
+          if (val) val.innerText = generateHexSecret();
+        });
+      }
     }
 
     try {
@@ -2039,6 +2784,226 @@ function renderTwpDashboard(hostname, secretHex) {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
+      'X-Robots-Tag': 'noindex, nofollow',
+    },
+  });
+}
+
+function renderCamouflageHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Alder &amp; Grid — Notes on Typography &amp; Web Layout</title>
+  <meta name="description" content="Short editorial essays on digital typography, editorial measure, and lightweight web architecture.">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #fafaf8;
+      --surface: #ffffff;
+      --text: #1a1a18;
+      --muted: #5a5a54;
+      --border: #e4e3dc;
+      --accent: #2c4a3e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121210;
+        --surface: #1a1a17;
+        --text: #ecebe4;
+        --muted: #a1a098;
+        --border: #2a2a25;
+        --accent: #8ab49f;
+      }
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Georgia, serif;
+      line-height: 1.65;
+    }
+    .wrap {
+      max-width: 680px;
+      margin: 0 auto;
+      padding: 2.5rem 1.25rem 3rem;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 1rem;
+      padding-bottom: 1.25rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 2.25rem;
+    }
+    .brand {
+      font-weight: 700;
+      font-size: 1rem;
+      letter-spacing: -0.01em;
+    }
+    nav ul {
+      list-style: none;
+      display: flex;
+      gap: 1.15rem;
+      margin: 0;
+      padding: 0;
+      font-size: 0.9rem;
+    }
+    nav a {
+      color: var(--muted);
+      text-decoration: none;
+    }
+    nav a:hover {
+      color: var(--text);
+    }
+    h1 {
+      font-size: clamp(1.65rem, 4vw, 2.2rem);
+      line-height: 1.25;
+      margin: 0 0 0.75rem;
+      letter-spacing: -0.02em;
+    }
+    .lead {
+      color: var(--muted);
+      margin: 0 0 2.25rem;
+      font-size: 1.02rem;
+    }
+    .section-title {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      margin: 0 0 1rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    article {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.15rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+    article h2 {
+      font-size: 1.05rem;
+      margin: 0 0 0.35rem;
+    }
+    article p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.93rem;
+    }
+    .meta {
+      display: inline-block;
+      font-size: 0.78rem;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      margin-bottom: 0.35rem;
+    }
+    .specs {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 0.85rem;
+      margin: 2rem 0;
+    }
+    .spec-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.9rem 1rem;
+    }
+    .spec-card strong {
+      display: block;
+      font-size: 1.1rem;
+      margin-bottom: 0.2rem;
+    }
+    .spec-card span {
+      font-size: 0.84rem;
+      color: var(--muted);
+    }
+    footer {
+      margin-top: 2.5rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.84rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">Alder &amp; Grid</div>
+      <nav aria-label="Primary">
+        <ul>
+          <li><a href="#essays">Essays</a></li>
+          <li><a href="#measure">Measure</a></li>
+          <li><a href="#colophon">Colophon</a></li>
+        </ul>
+      </nav>
+    </header>
+    <main>
+      <h1>Quiet interfaces for durable reading.</h1>
+      <p class="lead">An independent notebook on editorial grid proportions, legible line measure, and zero-dependency static HTML documents.</p>
+
+      <section id="essays" aria-labelledby="essays-heading">
+        <h2 id="essays-heading" class="section-title">Recent Notes</h2>
+        <article>
+          <span class="meta">01 · Typography</span>
+          <h2>Why 62–68 characters per line still anchors reading speed</h2>
+          <p>Excessively wide columns force long horizontal eye sweeps, while narrow columns break rhythmic phrasing. Constraining the container around 65ch preserves natural saccades across desktop and tablet screens.</p>
+        </article>
+        <article>
+          <span class="meta">02 · Performance</span>
+          <h2>System font stacks and single-document layout stability</h2>
+          <p>Avoiding external stylesheet waterfalls eliminates layout shifts on constrained mobile links and keeps first contentful paint nearly instantaneous without custom font subsetting.</p>
+        </article>
+        <article>
+          <span class="meta">03 · Accessibility</span>
+          <h2>Adaptive contrast across ambient light environments</h2>
+          <p>Pairing warm off-white paper tones in bright rooms with soft charcoal surfaces at night reduces glare while maintaining comfortable AA contrast ratios.</p>
+        </article>
+      </section>
+
+      <section id="measure" aria-labelledby="measure-heading">
+        <h2 id="measure-heading" class="section-title">Baseline Metrics</h2>
+        <div class="specs">
+          <div class="spec-card">
+            <strong>65 ch</strong>
+            <span>Target reading measure</span>
+          </div>
+          <div class="spec-card">
+            <strong>1.65</strong>
+            <span>Baseline body line-height</span>
+          </div>
+          <div class="spec-card">
+            <strong>0 B</strong>
+            <span>Third-party asset payload</span>
+          </div>
+        </div>
+      </section>
+    </main>
+    <footer id="colophon">
+      <span>© 2026 Alder &amp; Grid</span>
+      <span>Static Editorial Archive</span>
+    </footer>
+  </div>
+</body>
+</html>`;
+}
+
+function renderCamouflageSite(isHead = false) {
+  const html = renderCamouflageHtml();
+  return new Response(isHead ? null : html, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'public, max-age=0, must-revalidate',
+      'X-Content-Type-Options': 'nosniff',
     },
   });
 }
@@ -2051,24 +3016,6 @@ function renderNotFound() {
   });
 }
 
-async function serveCamouflage(request, camouflageUrl) {
-  try {
-    const cleanHeaders = new Headers();
-    const copyKeys = ['accept', 'accept-language', 'user-agent', 'cache-control', 'if-none-match', 'if-modified-since'];
-    for (const k of copyKeys) {
-      const val = request.headers.get(k);
-      if (val) cleanHeaders.set(k, val);
-    }
-    return await fetch(camouflageUrl, {
-      method: request.method === 'HEAD' ? 'HEAD' : 'GET',
-      headers: cleanHeaders,
-      redirect: 'follow',
-    });
-  } catch {
-    return renderNotFound();
-  }
-}
-
 // ==================================================================================
 // 8. HTTP REQUEST ROUTER & EXPORT
 // ==================================================================================
@@ -2079,6 +3026,17 @@ async function handleHttpRequest(request, env) {
 
   const url = new URL(request.url);
   const hostname = url.hostname.toLowerCase();
+  const adminPath = resolveAdminPath(env);
+
+  let decodedPathname;
+  try {
+    decodedPathname = decodeURIComponent(url.pathname);
+  } catch {
+    decodedPathname = url.pathname;
+  }
+  const normalizedPathname = decodedPathname.length > 1
+    ? decodedPathname.replace(/\/+$/, '')
+    : decodedPathname;
 
   // Route 1: Bridge Initializer
   if (url.pathname === '/' && request.method === 'GET' && /^\?bridge=[A-Za-z0-9_-]{43}$/.test(url.search)) {
@@ -2099,17 +3057,12 @@ async function handleHttpRequest(request, env) {
     return renderBridgeHtml(hostname, bootstrapToken, resolveMaxDials(env));
   }
 
-  // Route 2: Browser Landing Page / Camouflage Mode
-  if (url.pathname === '/' && request.method === 'GET' && !url.search) {
-    const camouflageUrl = typeof env?.CAMOUFLAGE_URL === 'string' ? env.CAMOUFLAGE_URL.trim() : '';
-    if (camouflageUrl) {
-      return serveCamouflage(request, camouflageUrl);
-    }
-    const secretHex = toHex(config.fullBytes);
-    return renderTwpDashboard(hostname, secretHex);
+  // Reject malformed bridge queries instead of falling back to landing pages
+  if (url.pathname === '/' && url.searchParams.has('bridge')) {
+    return renderNotFound();
   }
 
-  // Route 3: Session Lifecycle API
+  // Route 2: Session Lifecycle API
   if (url.pathname === '/api/v1/session') {
     if (request.method === 'POST') {
       const authBearer = extractBearerToken(request);
@@ -2146,7 +3099,7 @@ async function handleHttpRequest(request, env) {
     return renderNotFound();
   }
 
-  // Route 4: Multiplexed WebSocket Upgrade
+  // Route 3: Multiplexed WebSocket Upgrade
   if (
     url.pathname === '/api/v1/ws' &&
     request.method === 'GET' &&
@@ -2185,6 +3138,44 @@ async function handleHttpRequest(request, env) {
     });
   }
 
+  // Route 4: Protected ADMIN Panel (when ADMIN is configured)
+  if (adminPath !== null && request.method === 'GET' && normalizedPathname === '/' + adminPath) {
+    const secretHex = toHex(config.fullBytes);
+    return renderTwpDashboard(hostname, secretHex, {
+      adminMissing: false,
+      secretDefault: isDefaultSecret(env, config),
+    });
+  }
+
+  // Route 5: Browser Root (Stealth Camouflage when ADMIN is set, or Dashboard with warning when unset)
+  if (url.pathname === '/') {
+    if (adminPath !== null && (request.method === 'GET' || request.method === 'HEAD')) {
+      return renderCamouflageSite(request.method === 'HEAD');
+    }
+    if (adminPath === null && request.method === 'GET') {
+      const secretHex = toHex(config.fullBytes);
+      return renderTwpDashboard(hostname, secretHex, {
+        adminMissing: true,
+        secretDefault: isDefaultSecret(env, config),
+      });
+    }
+  }
+
+  // Route 6: Standard robots.txt when ADMIN stealth site is active
+  if (
+    adminPath !== null &&
+    normalizedPathname === '/robots.txt' &&
+    (request.method === 'GET' || request.method === 'HEAD')
+  ) {
+    return new Response(request.method === 'HEAD' ? null : 'User-agent: *\nAllow: /\n', {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600',
+      },
+    });
+  }
+
   return renderNotFound();
 }
 
@@ -2216,6 +3207,11 @@ export function getTwpInternals() {
     createAesCtrCipher,
     applyAesCtr,
     resolveConfig,
+    resolveAdminPath,
+    isDefaultSecret,
+    renderCamouflageHtml,
+    renderCamouflageSite,
+    renderTwpDashboard,
     issueStatelessToken,
     verifyStatelessToken,
     normalizeDcId,
