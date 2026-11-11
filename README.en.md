@@ -1,6 +1,6 @@
 <div align="center">
 
-<img width="2752" height="1536" alt="TWP Core Banner" src="https://github.com/user-attachments/assets/f19c1be0-faf2-4025-9454-7f65c8e40733" />
+<img width="2752" height="1536" alt="TWP Core Banner" src="https://github.com/user-attachments/assets/8ee2862d-1a2e-4baf-a239-9cee934b6070" />
 
 # ⚡ TWP (Telegram Worker Proxy) Core v2.3
 
