@@ -5,7 +5,7 @@
 # ⚡ TWP (Telegram Worker Proxy) Core v2.3
 
 **Official Serverless Telegram WEB Proxy Engine for Cloudflare Workers & Pages (Zero VPS Required)**  
-*[🇮🇷 مستندات فارسی (README.md)](README.md)*
+*[ مستندات فارسی (README.md)](README.md)*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Powered by Cloudflare Workers](https://img.shields.io/badge/Runtime-Cloudflare%20Workers%20%26%20Pages-orange.svg)](https://workers.cloudflare.com)
